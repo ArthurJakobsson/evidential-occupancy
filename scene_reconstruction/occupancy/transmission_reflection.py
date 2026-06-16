@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import polars as pl
@@ -134,12 +135,15 @@ class ReflectionTransmissionSpherical:
     batch_size: int = 1
     device: str = "cuda"
     name: str = "reflection_and_transmission_spherical"
+    missing_only: bool = False
+    # process only scenes [scene_offset, scene_offset + num_scenes) (for multi-GPU sharding)
+    scene_offset: int = 0
+    num_scenes: Optional[int] = None
 
     def process_data(self) -> None:
         """Process dataset."""
-        for scene in tqdm.tqdm(
-            self.ds.scene.iter_slices(1), total=len(self.ds.scene), position=0, desc="Processing scenes"
-        ):
+        scenes = self.ds.scene.slice(self.scene_offset, self.num_scenes)
+        for scene in tqdm.tqdm(scenes.iter_slices(1), total=len(scenes), position=0, desc="Processing scenes"):
             self.process_scene(scene)
 
     def save_path(self, scene_name: str, lidar_top_token: str) -> Path:
@@ -153,6 +157,17 @@ class ReflectionTransmissionSpherical:
         # load all sample data with lidar token
         scene = self.ds.join(scene, self.ds.sample)
         scene = self.ds.load_sample_data(scene, "LIDAR_TOP", with_data=False)
+        if self.missing_only:
+            # skip frames whose output already exists (lets a long run resume)
+            keep = pl.Series(
+                [
+                    not self.save_path(name, token).exists()
+                    for name, token in zip(scene["scene.name"], scene["LIDAR_TOP.sample_data.token"])
+                ]
+            )
+            scene = scene.filter(keep)
+            if len(scene) == 0:
+                return
         spherical_volume = Volume.new_volume(self.spherical_lower, self.spherical_upper)
         volume_lower = torch_to_series(
             "LIDAR_TOP.reflection_and_transmission_spherical.volume.lower", spherical_volume.lower

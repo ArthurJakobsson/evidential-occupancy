@@ -11,3 +11,9 @@
 
 # python cache files
 __pycache__/
+
+# per-machine paths (copy paths.env.example -> paths.env)
+/paths.env
+
+# multi-GPU run logs
+/logs

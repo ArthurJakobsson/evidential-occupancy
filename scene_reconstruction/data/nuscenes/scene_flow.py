@@ -4,6 +4,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import polars as pl
@@ -192,6 +193,9 @@ class SceneFlow:
 
     device: str = "cuda"
     missing_only: bool = False
+    # process only scenes [scene_offset, scene_offset + num_scenes) (for multi-GPU sharding)
+    scene_offset: int = 0
+    num_scenes: Optional[int] = None
 
     def load_scene(self, scene_name: str):
         """Loads a single scene for processing."""
@@ -278,7 +282,8 @@ class SceneFlow:
     def process_data(self):
         """Process dataset."""
         self.ds.load_sensor_sample_annotation("LIDAR_TOP")
-        for scene_name in tqdm.tqdm(self.ds.scene["scene.name"], position=0, desc="Calculate scene flow from boxes"):
+        scene_names = self.ds.scene.slice(self.scene_offset, self.num_scenes)["scene.name"]
+        for scene_name in tqdm.tqdm(scene_names, position=0, desc="Calculate scene flow from boxes"):
             self.process_scene(scene_name)
 
 

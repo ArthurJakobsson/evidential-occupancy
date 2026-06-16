@@ -24,6 +24,16 @@ data-processing = { depends-on = [
     "scene-flow",
     "temporal-accumulation",
 ] }
+# Full dataset (v1.0-trainval, all sweeps). Outputs -> data/nuscenes_extra (symlinked to
+# the ARTHUR drive). Resumable: re-running skips frames that already exist.
+transmissions-reflections-full = "python -m scene_reconstruction.cli.main export ./conf full transmissions-reflections"
+scene-flow-full = "python -m scene_reconstruction.cli.main export ./conf full scene-flow"
+temporal-accumulation-full = "python -m scene_reconstruction.cli.main export ./conf full temporal-accumulation"
+data-processing-full = { depends-on = [
+    "transmissions-reflections-full",
+    "scene-flow-full",
+    "temporal-accumulation-full",
+] }
 # Evaluation
 eval-bba04 = "python -m scene_reconstruction.cli.main eval ./conf bba04 render-lidar-depth"
 eval-bba = "python -m scene_reconstruction.cli.main eval ./conf bba render-lidar-depth"

@@ -80,7 +80,13 @@ class NuscenesDataset:
 
     def read_json(self, name: ANNOTATION_FILES):
         """Reads NuScenes json files."""
-        return pl.read_json(self.data_root / self.version / f"{name}.json").select(SELECTION[name])
+        df = pl.read_json(self.data_root / self.version / f"{name}.json")
+        # The `index` field on `category` only ships with the lidarseg expansion. Plain
+        # nuScenes lacks it; synthesize a row index so the schema resolves (the value is
+        # unused by the geometric occupancy pipeline).
+        if name == "category" and "index" not in df.columns:
+            df = df.with_row_index("index")
+        return df.select(SELECTION[name])
 
     def _assign_sample_keyframe_index(self, sample: pl.DataFrame):
         sample = sample.sort("scene.token", "sample.timestamp").with_columns(
