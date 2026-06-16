@@ -1,49 +1,75 @@
-# Open-vocabulary labels via LOcc
+# Open-vocabulary labels via LOcc — working recipe (validated on nuScenes-mini)
 
-LOcc (ICCV 2025, https://github.com/pkqbajng/LOcc) generates open-vocabulary voxel labels +
-a CLIP feature field for nuScenes. It runs in its **own** environment (mmdet3d / BEVDet on a
-modern CUDA) — separate from this repo's pixi/CUDA-11.6 env — and we only consume its output
-here, via the `locc-transfer` stage.
+LOcc (ICCV 2025, https://github.com/pkqbajng/LOcc) generates open-vocabulary voxel labels for
+nuScenes via a transitive pipeline: **LVLM vocabulary → OV-Seg (SAN) → point/voxel GT**. It
+runs in its own conda envs; we consume its per-keyframe output via the `locc-transfer` stage
+(`scene_reconstruction/labels/locc_transfer.py`) and the `scripts/locc_pkl_to_raw.py` converter.
 
-## 1. Set up LOcc (its own env, once)
+This was brought up and validated end-to-end on this 12 GB RTX 3080 Ti against scene-0061.
+Patched LOcc-side scripts are saved under `locc_patches/` (apply them into your LOcc clone).
+
+## Key decisions for a 12 GB card
+- **Skip the Qwen-VL LVLM step for the mini test** — `Qwen/Qwen-VL-Chat` is fp16 ~19 GB (OOM)
+  and ~7 h over all of mini. SAN ships a built-in **`--fixed_vocab`** (36 nuScenes-relevant
+  words), which gives a real open-vocab label without the LVLM. Use the full Qwen path on the
+  L40S (see bottom).
+- **GT-generation needs nuScenes lidarseg** (`PseudoOccGeneration.py` reads per-point lidarseg) —
+  install it under `$NUSCENES_ROOT` (we did: `lidarseg/v1.0-*`). It needs **no** `can_bus` / bevdet
+  infos (it uses the devkit directly).
+- **detectron2 has no prebuilt wheel for torch 1.12/cu113**, and the system nvcc is 12.1 → build
+  CPU-ops only (SAN uses no detectron2 custom CUDA ops): `CUDA_VISIBLE_DEVICES='' FORCE_CUDA=0 pip install -e .`
+
+## Envs (this machine)
+- `locc-san` — python 3.8, torch 1.12.1+cu113, SAN requirements, detectron2 v0.6 (CPU build), `ckpts/san_vit_large_14.pth`.
+- `locc-gt` — clone of `daocc` (torch 1.10+cu113, mmcv-full 1.4, nuscenes-devkit) + `pip install open3d`. (scene variant needs no `chamfer_dist`.)
+- `locc-llm` — python 3.10, torch 2.1.2+cu121 + 1-LVLM/requirements (only for the full Qwen path; `auto-gptq` needs a version pin compatible with transformers 4.37.2).
+
+## Data layout (`LOcc/data/occ3d`, symlinks)
 ```bash
-git clone https://github.com/pkqbajng/LOcc.git ~/LOcc && cd ~/LOcc
-# follow its README: create the conda env, install mmcv/mmdet3d/BEVDet, download the
-# pretrained weights + the LVLM/open-vocab segmentation models it uses.
+cd ~/LOcc && mkdir -p data/occ3d
+NUSC=$NUSCENES_ROOT; OCC3D=<path-to>/Occ3D/nuScenes/gts
+for d in samples sweeps maps v1.0-mini v1.0-test v1.0-trainval lidarseg; do ln -sfn "$NUSC/$d" data/occ3d/$d; done
+ln -sfn "$OCC3D" data/occ3d/gts
 ```
-LOcc needs the nuScenes images + calibration (already on the SSD) — point its config at
-`$NUSCENES_ROOT`.
 
-## 2. Run LOcc + export to the format this repo expects
-Run LOcc's label-generation pipeline, then dump, per LIDAR key-frame, an Occ3D-grid
-([200,200,16]) `.npz` to:
-```
-$NUSCENES_EXTRA_ROOT/locc_raw/<scene>/LIDAR_TOP/<lidar_sample_data_token>.npz
-```
-with keys:
-| key | dtype / shape | meaning |
-|-----|---------------|---------|
-| `semantics`   | int16  [200,200,16] | LOcc open-vocab class id per voxel (use `-1` for empty) |
-| `feat_coords` | int16  [M,3]        | Occ3D voxel indices that carry a CLIP feature |
-| `feat`        | float16 [M,128]     | L2-normalized CLIP features at those voxels |
+## Run the pipeline (mini test, scene-0061)
+Patched scripts (from `locc_patches/`): `2-OVSeg/SAN/main_mini.py`, `1-LVLM/qwen_vlm_step1_mini.py`,
+and the `--version` patch for `3-GroundTruthGeneration/PseudoOccGeneration.py`
+(`git apply locc_patches/PseudoOccGeneration_version.patch` in the LOcc clone).
 
-Also save the label→text vocabulary once at `locc_raw/vocab.json` (your reference; this repo
-keeps the integer ids). Key files by the **LIDAR sample_data token** (the `.arrow` stem used
-by every other stage) so they align — map from the nuScenes sample token in LOcc's loader.
-
-## 3. Transfer onto the evidential geometry (this repo's env)
 ```bash
-source paths.env            # full run; or use ./conf default for mini
-pixi run locc-transfer      # mini  (pixi run locc-transfer-full for v1.0-trainval)
+ROOT=~/LOcc; OCC=$ROOT/data/occ3d
+# 1) OV-Seg (SAN) with fixed vocabulary  [env locc-san]
+conda run -n locc-san bash -c "cd $ROOT/2-OVSeg/SAN && python main_mini.py --fixed_vocab \
+  --version v1.0-mini --scenes scene-0061 --data_root $OCC --output_root $OCC/san_qwen_scene"
+# 2) GT generation -> label_ovo.pkl  [env locc-gt]  (scene-0061 = nusc.scene index 0)
+conda run -n locc-gt bash -c "cd $ROOT/3-GroundTruthGeneration && python PseudoOccGeneration.py \
+  --dataset nuscenes --version v1.0-mini --split all --start 0 --end 1 \
+  --data_root $OCC --seg_root $OCC/san_qwen_scene --save_path $OCC/san_gts_qwen_scene"
 ```
-This writes:
-- `locc_transfer/<scene>/LIDAR_TOP/<token>.arrow` — `semantics` [400,400,32] (2x2x2 upsample of LOcc's labels),
-- `locc_clip/<scene>/LIDAR_TOP/<token>.npz` — sparse CLIP at our occupied voxels: `coords` [Nv,3] + `feat` [Nv,128] f16 (dense would be ~1.3 GB/frame).
 
-The CLIP step needs the `evidence` stage (for the occupied voxels); discrete labels do not.
+## Bring it into our dataset  [pixi env]
+```bash
+cd ~/Documents/evidential-occupancy
+pixi run python scripts/locc_pkl_to_raw.py \
+  --locc_gts $OCC/san_gts_qwen_scene --vocab $OCC/san_qwen_scene/vocab.txt \
+  --data_root data/nuscenes --version v1.0-mini --extra data/nuscenes_extra      # -> locc_raw/ + vocab.json
+pixi run python -m scene_reconstruction.cli.main export ./conf preview locc-transfer  # -> locc_transfer/*.arrow
+pixi run python scripts/vis_occupancy_viser.py --num_samples 5                        # Color by: locc_class
+```
+`locc_transfer` writes per-voxel open-vocab class on our 0.2 m grid (2×2×2 upsample of LOcc's
+[200,200,16]); `vocab.json` is the class-index→name map. The viewer's **`locc_class`** mode colors
+by it. On scene-0061 it distinguishes tree / building / grass / wall / fence / traffic light / sign —
+finer than Occ3D's manmade/vegetation.
 
-## Notes
-- Licensing: LOcc weights + nuScenes are restricted — release generation code + derived
-  labels, not repackaged inputs.
-- The transfer reuses the same 2x2x2 Occ3D↔evidential alignment as `occ3d-transfer`.
-- For storage, CLIP is stored sparsely and (recommended) only for key-frames.
+## Full open-vocab (Qwen) path — recommended on the L40S
+Run steps 1-3 in order with the real LVLM vocabulary instead of `--fixed_vocab`:
+```bash
+# step 1 (locc-llm): qwen_vlm_step1_mini.py (Int4 model on a 12 GB card; full model on L40S) -> qwen_texts_step1
+#   then qwen_vlm_step2.py / step3.py -> qwen_texts   (pin auto-gptq for transformers 4.37.2, or use the fp16 model on 48 GB)
+# step 2 (locc-san): drop --fixed_vocab, add --vocab_root $OCC/qwen_texts
+# step 3 (locc-gt): same as above
+```
+For CLIP features (a re-queryable field), use `PseudoOccGeneration-Feat.py` + `4-Autoencoder/`
+to compress CLIP 512→128, then extend the converter to emit `feat_coords`/`feat` (locc-transfer
+already stores them sparsely under `locc_clip/`).

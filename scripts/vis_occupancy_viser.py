@@ -41,10 +41,18 @@ UPPER_COL = f"{RT_COL}.volume.upper"
 CLASS_NAMES = list(occupancy_to_color.keys())  # index -> name, 0=other .. 17=free
 FREE_CLASS = 17
 FREE_GRAY = np.array([120, 120, 120], dtype=np.uint8)  # how we show occupied-but-unlabeled voxels
-COLOR_MODES = ("height", "confidence", "uncertainty", "occ3d_class", "box_class")
+COLOR_MODES = ("height", "confidence", "uncertainty", "occ3d_class", "box_class", "locc_class")
 BG_GRAY = np.array([50, 50, 50], dtype=np.uint8)  # background (no box) in box_class mode
 # surround cameras, laid out front row then back row
 CAM_ORDER = ["CAM_FRONT_LEFT", "CAM_FRONT", "CAM_FRONT_RIGHT", "CAM_BACK_LEFT", "CAM_BACK", "CAM_BACK_RIGHT"]
+
+# LOcc open-vocab labels use their own (larger) vocabulary; names loaded from locc_raw/vocab.json,
+# colored by a distinct 60-colour palette (-1 = unlabeled -> gray).
+LOCC_NAMES: dict[int, str] = {}
+LOCC_PALETTE = np.concatenate(
+    [(np.array([mpl.colormaps[c](i)[:3] for i in range(20)]) * 255).astype(np.uint8)
+     for c in ("tab20", "tab20b", "tab20c")]
+)
 
 
 def discover_files(data_dir: Path) -> list[Path]:
@@ -87,6 +95,15 @@ def _maybe_load_box(labels_root: Path, scene: str, token: str) -> torch.Tensor |
     return series_to_torch(df["LIDAR_TOP.box_semantics.category_index"])[0].to(torch.int64)
 
 
+def _maybe_load_locc(labels_root: Path, scene: str, token: str) -> torch.Tensor | None:
+    """LOcc open-vocab class index [X,Y,Z] (-1 = empty/unlabeled), or None."""
+    f = labels_root / "locc_transfer" / scene / "LIDAR_TOP" / f"{token}.arrow"
+    if not f.exists():
+        return None
+    df = pl.read_ipc(f, memory_map=False)
+    return series_to_torch(df["LIDAR_TOP.locc_transfer.semantics"])[0].to(torch.int64)
+
+
 def load_sample(path: Path, labels_root: Path | None):
     """Load one key-frame: RT volume, bounds, scene/token, and optional label grids."""
     df = pl.read_ipc(path, memory_map=False)
@@ -97,8 +114,9 @@ def load_sample(path: Path, labels_root: Path | None):
     scene = path.parent.parent.name
     sem, fdist = _maybe_load_occ3d(labels_root, scene, token) if labels_root is not None else (None, None)
     box = _maybe_load_box(labels_root, scene, token) if labels_root is not None else None
+    locc = _maybe_load_locc(labels_root, scene, token) if labels_root is not None else None
     return {"rt": rt, "lower": lower, "upper": upper, "scene": scene, "token": token,
-            "sem": sem, "fdist": fdist, "box": box}
+            "sem": sem, "fdist": fdist, "box": box, "locc": locc}
 
 
 def occ3d_source_points(sample):
@@ -125,7 +143,8 @@ def occupancy(sample, p_fn, p_fp):
     omega = m_omega[occ].numpy().astype(np.float32)
     cls = sample["sem"][occ].numpy().astype(np.int64) if sample["sem"] is not None else None
     box = sample["box"][occ].numpy().astype(np.int64) if sample["box"] is not None else None
-    return pts, conf, omega, cls, box
+    locc = sample["locc"][occ].numpy().astype(np.int64) if sample["locc"] is not None else None
+    return pts, conf, omega, cls, box, locc
 
 
 def class_colors(cls: np.ndarray) -> np.ndarray:
@@ -142,12 +161,21 @@ def box_colors(box: np.ndarray) -> np.ndarray:
     return cols
 
 
-def colorize(pts, conf, omega, cls, mode, z_range, box=None) -> np.ndarray:
+def locc_colors(locc: np.ndarray) -> np.ndarray:
+    """LOcc open-vocab class -> RGB, unlabeled (-1) shown gray."""
+    cols = LOCC_PALETTE[np.clip(locc, 0, len(LOCC_PALETTE) - 1)].copy()
+    cols[locc == -1] = FREE_GRAY
+    return cols
+
+
+def colorize(pts, conf, omega, cls, mode, z_range, box=None, locc=None) -> np.ndarray:
     """Map per-point scalars/classes -> uint8 RGB."""
     if mode == "occ3d_class" and cls is not None:
         return class_colors(cls)
     if mode == "box_class" and box is not None:
         return box_colors(box)
+    if mode == "locc_class" and locc is not None:
+        return locc_colors(locc)
     if mode == "uncertainty":
         return (mpl.colormaps["turbo"](np.clip(omega, 0.0, 1.0))[:, :3] * 255).astype(np.uint8)
     if mode == "confidence":
@@ -155,6 +183,19 @@ def colorize(pts, conf, omega, cls, mode, z_range, box=None) -> np.ndarray:
     z0, z1 = z_range  # height
     vals = np.clip((pts[:, 2] - z0) / max(z1 - z0, 1e-6), 0.0, 1.0)
     return (mpl.colormaps["turbo"](vals)[:, :3] * 255).astype(np.uint8)
+
+
+def class_swatch(mode: str, c: int):
+    """(rgb in [0,1], name) for a class index in a class color mode."""
+    if mode == "locc_class":
+        if c == -1:
+            return FREE_GRAY / 255.0, "unlabeled"
+        return LOCC_PALETTE[c % len(LOCC_PALETTE)] / 255.0, LOCC_NAMES.get(c, str(c))
+    if mode == "box_class" and c == 0:
+        return BG_GRAY / 255.0, "background"
+    if mode == "occ3d_class" and c == FREE_CLASS:
+        return FREE_GRAY / 255.0, "free / no Occ3D label"
+    return occupancy_color_map[c].numpy() / 255.0, CLASS_NAMES[c]
 
 
 # colormap + scalar-field label per scalar color mode (must match `colorize`)
@@ -169,18 +210,13 @@ def legend_image(mode: str, present_classes: list[int], scalar_range: tuple[floa
     import matplotlib.pyplot as plt
     from matplotlib.patches import Rectangle
 
-    if mode in ("occ3d_class", "box_class"):
+    if mode in ("occ3d_class", "box_class", "locc_class"):
         classes = present_classes or [0]
         fig, ax = plt.subplots(figsize=(2.8, 0.30 * len(classes) + 0.2))
         ax.axis("off")
         for i, c in enumerate(classes):
             y = len(classes) - 1 - i
-            if mode == "box_class" and c == 0:
-                color, name = BG_GRAY / 255.0, "background"
-            elif mode == "occ3d_class" and c == FREE_CLASS:
-                color, name = FREE_GRAY / 255.0, "free / no Occ3D label"
-            else:
-                color, name = occupancy_color_map[c].numpy() / 255.0, CLASS_NAMES[c]
+            color, name = class_swatch(mode, c)
             ax.add_patch(Rectangle((0, y), 0.8, 0.8, facecolor=color, edgecolor="k", lw=0.4))
             ax.text(1.0, y + 0.4, name, va="center", fontsize=8)
         ax.set_xlim(0, 6)
@@ -262,6 +298,8 @@ def main():
     if not files:
         raise SystemExit(f"No .arrow files under {args.data_dir}. Run temporal-accumulation first.")
     labels_root = Path(args.labels_root) if args.labels_root else None
+    if labels_root is not None and (labels_root / "locc_raw" / "vocab.json").exists():
+        LOCC_NAMES.update({int(k): v for k, v in json.load(open(labels_root / "locc_raw" / "vocab.json")).items()})
     picked = pick_samples(files, args.num_samples)
     print(f"Found {len(files)} accumulated samples; showing {len(picked)}:")
     samples = []
@@ -315,7 +353,8 @@ def main():
     state = {"idx": 0, "legend": None, "legend_key": None, "cam_handles": []}
 
     def update_legend(mode, present_classes, scalar_range):
-        key = (mode, tuple(present_classes)) if mode == "occ3d_class" else (mode, scalar_range)
+        is_class = mode in ("occ3d_class", "box_class", "locc_class")
+        key = (mode, tuple(present_classes)) if is_class else (mode, scalar_range)
         if key == state["legend_key"]:
             return
         state["legend_key"] = key
@@ -360,34 +399,32 @@ def main():
             )
             print(f"sample {state['idx']+1}/{len(samples)}: ORIGINAL Occ3D voxels={len(pts)}")
             return
-        pts, conf, omega, cls, box = occupancy(s, p_fn_sld.value, p_fp_sld.value)
+        pts, conf, omega, cls, box, locc = occupancy(s, p_fn_sld.value, p_fp_sld.value)
         mode = color_mode.value
-        if (mode == "occ3d_class" and cls is None) or (mode == "box_class" and box is None):
+        if ((mode == "occ3d_class" and cls is None) or (mode == "box_class" and box is None)
+                or (mode == "locc_class" and locc is None)):
             mode = "height"
-        active = cls if mode == "occ3d_class" else (box if mode == "box_class" else None)
+        active = {"occ3d_class": cls, "box_class": box, "locc_class": locc}.get(mode)
+        unlabeled = {"occ3d_class": FREE_CLASS, "box_class": 0, "locc_class": -1}.get(mode)
         if hide_free.value and active is not None:
-            unlabeled = FREE_CLASS if mode == "occ3d_class" else 0
             keep = active != unlabeled
             pts, conf, omega = pts[keep], conf[keep], omega[keep]
             cls = cls[keep] if cls is not None else None
             box = box[keep] if box is not None else None
+            locc = locc[keep] if locc is not None else None
             active = active[keep]
         if len(pts) == 0:
             pc.points, pc.colors, pc.point_size = np.zeros((1, 3), np.float32), np.zeros((1, 3), np.uint8), psize.value
             return
-        pc.points, pc.colors, pc.point_size = pts, colorize(pts, conf, omega, cls, mode, z_range, box), psize.value
+        pc.points, pc.colors, pc.point_size = (
+            pts, colorize(pts, conf, omega, cls, mode, z_range, box, locc), psize.value)
 
         present_classes = sorted(int(c) for c in np.unique(active)) if active is not None else []
-
-        def _cname(c):
-            if mode == "box_class":
-                return "background" if c == 0 else CLASS_NAMES[c]
-            return "free/unlabeled" if c == FREE_CLASS else CLASS_NAMES[c]
-
-        named = ", ".join(_cname(c) for c in present_classes)
+        named = ", ".join(class_swatch(mode, c)[1] for c in present_classes)
         scalar_range = z_range if mode == "height" else (0.0, 1.0)
         update_legend(mode, present_classes, scalar_range)
-        label = {"occ3d_class": "Occ3D classes", "box_class": "box classes"}.get(mode, "classes")
+        label = {"occ3d_class": "Occ3D classes", "box_class": "box classes",
+                 "locc_class": "LOcc classes"}.get(mode, "classes")
         info.content = (
             f"### Sample {state['idx'] + 1}/{len(samples)}\n"
             f"**scene:** `{s['scene']}`\n\n**token:** `{s['token']}`\n\n"

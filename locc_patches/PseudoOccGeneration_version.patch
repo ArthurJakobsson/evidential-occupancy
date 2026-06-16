@@ -1,0 +1,21 @@
+diff --git a/3-GroundTruthGeneration/PseudoOccGeneration.py b/3-GroundTruthGeneration/PseudoOccGeneration.py
+index 03fa7fd..a1dae1c 100644
+--- a/3-GroundTruthGeneration/PseudoOccGeneration.py
++++ b/3-GroundTruthGeneration/PseudoOccGeneration.py
+@@ -569,6 +569,7 @@ if __name__ == '__main__':
+     parse.add_argument('--data_root', type=str, default='data/occ3d')
+     parse.add_argument('--nusc_val_list', type=str, default='./nuscenes_val_list.txt')
+     parse.add_argument('--label_mapping', type=str, default='./nuscenes.yaml')
++    parse.add_argument('--version', type=str, default='v1.0-trainval')
+     args=parse.parse_args()
+ 
+     if args.dataset=='nuscenes':
+@@ -578,7 +579,7 @@ if __name__ == '__main__':
+                 val_list.append(item[:-1])
+         file.close()
+ 
+-        nusc = NuScenes(version='v1.0-trainval',
++        nusc = NuScenes(version=args.version,
+                         dataroot=args.data_root,
+                         verbose=True)
+         train_scenes = splits.train
