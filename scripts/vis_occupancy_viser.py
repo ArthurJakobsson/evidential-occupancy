@@ -4,19 +4,21 @@
 Reads the accumulated reflection/transmission volumes (``temporal-accumulation``) and turns
 them into occupancy via Dempster-Shafer belief. If the per-stage label outputs exist under
 ``--labels_root`` (``evidence/``, ``occ3d_transfer/``), the occupied voxels can also be
-colored by **epistemic uncertainty** (m_omega) or **Occ3D semantic class**.
+colored by **epistemic uncertainty** (m_omega) or **Occ3D semantic class**. If the nuScenes
+dataset is reachable, the 6 surround-camera **source images** for the current key-frame are
+shown in the GUI.
 
 Usage (inside the pixi env):
     pixi run python scripts/vis_occupancy_viser.py --num_samples 5
     pixi run python scripts/vis_occupancy_viser.py \
-        --data_dir data/nuscenes_extra/reflection_and_transmission_multi_frame \
-        --labels_root data/nuscenes_extra --num_samples 5
+        --labels_root data/nuscenes_extra --nuscenes data/nuscenes --num_samples 5
 
 Then open the printed URL (default http://localhost:8080).
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import time
 from pathlib import Path
@@ -26,6 +28,7 @@ import numpy as np
 import polars as pl
 import torch
 import viser
+from PIL import Image
 
 from scene_reconstruction.core.volume import Volume
 from scene_reconstruction.data.nuscenes.polars_helpers import series_to_torch
@@ -36,7 +39,11 @@ RT_COL = "LIDAR_TOP.reflection_and_transmission_multi_frame"
 LOWER_COL = f"{RT_COL}.volume.lower"
 UPPER_COL = f"{RT_COL}.volume.upper"
 CLASS_NAMES = list(occupancy_to_color.keys())  # index -> name, 0=other .. 17=free
+FREE_CLASS = 17
+FREE_GRAY = np.array([120, 120, 120], dtype=np.uint8)  # how we show occupied-but-unlabeled voxels
 COLOR_MODES = ("height", "confidence", "uncertainty", "occ3d_class")
+# surround cameras, laid out front row then back row
+CAM_ORDER = ["CAM_FRONT_LEFT", "CAM_FRONT", "CAM_FRONT_RIGHT", "CAM_BACK_LEFT", "CAM_BACK", "CAM_BACK_RIGHT"]
 
 
 def discover_files(data_dir: Path) -> list[Path]:
@@ -95,10 +102,17 @@ def occupancy(sample, p_fn, p_fp):
     return pts, conf, omega, cls
 
 
+def class_colors(cls: np.ndarray) -> np.ndarray:
+    """Occ3D class -> RGB, with free/unlabeled (17) shown gray instead of the palette blue."""
+    cols = occupancy_color_map[np.clip(cls, 0, len(CLASS_NAMES) - 1)].numpy().astype(np.uint8)
+    cols[cls == FREE_CLASS] = FREE_GRAY
+    return cols
+
+
 def colorize(pts, conf, omega, cls, mode, z_range) -> np.ndarray:
     """Map per-point scalars/classes -> uint8 RGB."""
     if mode == "occ3d_class" and cls is not None:
-        return occupancy_color_map[np.clip(cls, 0, len(CLASS_NAMES) - 1)].numpy().astype(np.uint8)
+        return class_colors(cls)
     if mode == "uncertainty":
         return (mpl.colormaps["turbo"](np.clip(omega, 0.0, 1.0))[:, :3] * 255).astype(np.uint8)
     if mode == "confidence":
@@ -122,20 +136,20 @@ def legend_image(mode: str, present_classes: list[int], scalar_range: tuple[floa
 
     if mode == "occ3d_class":
         classes = present_classes or [0]
-        fig, ax = plt.subplots(figsize=(2.6, 0.30 * len(classes) + 0.2))
+        fig, ax = plt.subplots(figsize=(2.8, 0.30 * len(classes) + 0.2))
         ax.axis("off")
         for i, c in enumerate(classes):
             y = len(classes) - 1 - i
-            ax.add_patch(Rectangle((0, y), 0.8, 0.8, facecolor=occupancy_color_map[c].numpy() / 255.0,
-                                   edgecolor="k", lw=0.4))
-            ax.text(1.0, y + 0.4, CLASS_NAMES[c], va="center", fontsize=8)
-        ax.set_xlim(0, 5)
+            color = (FREE_GRAY / 255.0) if c == FREE_CLASS else (occupancy_color_map[c].numpy() / 255.0)
+            name = "free / no Occ3D label" if c == FREE_CLASS else CLASS_NAMES[c]
+            ax.add_patch(Rectangle((0, y), 0.8, 0.8, facecolor=color, edgecolor="k", lw=0.4))
+            ax.text(1.0, y + 0.4, name, va="center", fontsize=8)
+        ax.set_xlim(0, 6)
         ax.set_ylim(0, len(classes))
     else:
         grad = np.linspace(scalar_range[0], scalar_range[1], 256)[None, :]
         fig, ax = plt.subplots(figsize=(2.8, 0.7))
-        ax.imshow(grad, aspect="auto", cmap=SCALAR_CMAP[mode],
-                  extent=[scalar_range[0], scalar_range[1], 0, 1])
+        ax.imshow(grad, aspect="auto", cmap=SCALAR_CMAP[mode], extent=[scalar_range[0], scalar_range[1], 0, 1])
         ax.set_yticks([])
         ax.set_title(SCALAR_LABEL[mode], fontsize=8)
         ax.tick_params(labelsize=7)
@@ -147,11 +161,57 @@ def legend_image(mode: str, present_classes: list[int], scalar_range: tuple[floa
     return img
 
 
+def detect_version(nuscenes_root: Path, samples) -> str:
+    """Pick the nuScenes version whose scene.json contains all displayed scenes."""
+    needed = {s["scene"] for s in samples}
+    for v in ("v1.0-mini", "v1.0-trainval"):
+        f = nuscenes_root / v / "scene.json"
+        if f.exists():
+            names = {row["name"] for row in json.load(open(f))}
+            if needed <= names:
+                return v
+    return "v1.0-trainval"
+
+
+def build_camera_map(samples, nuscenes_root: Path, version: str) -> dict[str, dict[str, str]]:
+    """{lidar_token: {camera: image_path}} for the displayed key-frames."""
+    from scene_reconstruction.data.nuscenes.dataset import NuscenesDataset
+
+    ds = NuscenesDataset(data_root=nuscenes_root, version=version, key_frames_only=True)
+    scene_names = sorted({s["scene"] for s in samples})
+    scene = ds.get_scene(ds.scene.filter(pl.col("scene.name").is_in(scene_names)))
+    scene = ds.load_sample_data(scene, "LIDAR_TOP", with_data=False)
+    scene = scene.filter(pl.col("LIDAR_TOP.sample_data.is_key_frame"))
+    for cam in CAM_ORDER:
+        scene = ds.load_sample_data(scene, cam, with_data=False)
+    cmap: dict[str, dict[str, str]] = {}
+    for row in scene.iter_rows(named=True):
+        tok = row["LIDAR_TOP.sample_data.token"]
+        cmap[tok] = {
+            cam: str(nuscenes_root / row[f"{cam}.sample_data.filename"])
+            for cam in CAM_ORDER
+            if row.get(f"{cam}.sample_data.filename")
+        }
+    return cmap
+
+
+def load_image_downscaled(path: str, width: int) -> np.ndarray:
+    img = Image.open(path).convert("RGB")
+    w, h = img.size
+    if w > width:
+        img = img.resize((width, max(1, round(h * width / w))))
+    return np.asarray(img)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data_dir", default="data/nuscenes_extra/reflection_and_transmission_multi_frame")
     ap.add_argument("--labels_root", default="data/nuscenes_extra",
                     help="Root with evidence/ and occ3d_transfer/ (enables class/uncertainty coloring).")
+    ap.add_argument("--nuscenes", default="data/nuscenes", help="nuScenes root for source camera images.")
+    ap.add_argument("--nuscenes_version", default="", help="v1.0-mini / v1.0-trainval (auto-detect if empty).")
+    ap.add_argument("--no_cameras", action="store_true", help="Disable the source-camera panel.")
+    ap.add_argument("--cam_width", type=int, default=360, help="Downscaled camera-image width (px).")
     ap.add_argument("--num_samples", type=int, default=5)
     ap.add_argument("--p_fn", type=float, default=0.8)
     ap.add_argument("--p_fp", type=float, default=0.2)
@@ -173,6 +233,19 @@ def main():
     z_range = (float(samples[0]["lower"][2]), float(samples[0]["upper"][2]))
     have_sem = any(s["sem"] is not None for s in samples)
 
+    # optional source-camera index
+    camera_map: dict[str, dict[str, str]] = {}
+    cam_enabled = (not args.no_cameras) and Path(args.nuscenes).exists()
+    if cam_enabled:
+        nuroot = Path(args.nuscenes)
+        version = args.nuscenes_version or detect_version(nuroot, samples)
+        try:
+            camera_map = build_camera_map(samples, nuroot, version)
+            print(f"Loaded source-camera index for {len(camera_map)} key-frames (nuScenes {version}).")
+        except Exception as exc:  # noqa: BLE001
+            print(f"Source-camera panel disabled ({type(exc).__name__}: {exc}).")
+            cam_enabled = False
+
     server = viser.ViserServer(host=os.environ.get("VISER_HOST", "0.0.0.0"), port=args.port)
     server.scene.add_frame("/ego", show_axes=True, axes_length=3.0, axes_radius=0.1)
     server.scene.add_grid("/ground", width=80.0, height=80.0, position=(0.0, 0.0, z_range[0]))
@@ -181,8 +254,8 @@ def main():
                                       point_size=args.point_size, point_shape="square")
 
     server.gui.add_markdown("## Evidential occupancy + labels\n"
-                            "Color by height / uncertainty (m_omega) / Occ3D class. "
-                            "Tune `p_fn`/`p_fp` for the occupancy threshold.")
+                            "Color by height / uncertainty (m_omega) / Occ3D class. Gray = occupied but "
+                            "free/unlabeled in Occ3D. Tune `p_fn`/`p_fp` for the occupancy threshold.")
     info = server.gui.add_markdown("")
     with server.gui.add_folder("Navigate samples"):
         prev_b = server.gui.add_button("Prev", icon=viser.Icon.CHEVRON_LEFT)
@@ -194,20 +267,40 @@ def main():
     with server.gui.add_folder("Display"):
         default_mode = "occ3d_class" if have_sem else "height"
         color_mode = server.gui.add_dropdown("Color by", options=COLOR_MODES, initial_value=default_mode)
+        hide_free = server.gui.add_checkbox("Hide free/unlabeled", initial_value=False)
         psize = server.gui.add_slider("Point size", min=0.02, max=0.4, step=0.01, initial_value=args.point_size)
     legend_folder = server.gui.add_folder("Color guide")
+    cam_folder = server.gui.add_folder("Source cameras") if cam_enabled else None
 
-    state = {"idx": 0, "legend": None, "legend_key": None}
+    state = {"idx": 0, "legend": None, "legend_key": None, "cam_handles": []}
 
     def update_legend(mode, present_classes, scalar_range):
         key = (mode, tuple(present_classes)) if mode == "occ3d_class" else (mode, scalar_range)
         if key == state["legend_key"]:
-            return  # unchanged -> skip the matplotlib rebuild
+            return
         state["legend_key"] = key
         if state["legend"] is not None:
             state["legend"].remove()
         with legend_folder:
             state["legend"] = server.gui.add_image(legend_image(mode, present_classes, scalar_range), label=None)
+
+    def update_cameras():
+        if not cam_enabled:
+            return
+        for h in state["cam_handles"]:
+            h.remove()
+        state["cam_handles"].clear()
+        cams = camera_map.get(samples[state["idx"]]["token"], {})
+        with cam_folder:
+            for cam in CAM_ORDER:
+                path = cams.get(cam)
+                if not path or not Path(path).exists():
+                    continue
+                try:
+                    img = load_image_downscaled(path, args.cam_width)
+                except Exception:  # noqa: BLE001
+                    continue
+                state["cam_handles"].append(server.gui.add_image(img, label=cam))
 
     def render():
         s = samples[state["idx"]]
@@ -215,22 +308,24 @@ def main():
         mode = color_mode.value
         if mode == "occ3d_class" and cls is None:
             mode = "height"
+        if cls is not None and hide_free.value:
+            keep = cls != FREE_CLASS
+            pts, conf, omega, cls = pts[keep], conf[keep], omega[keep], cls[keep]
         if len(pts) == 0:
-            pts, cols = np.zeros((1, 3), np.float32), np.zeros((1, 3), np.uint8)
-        else:
-            cols = colorize(pts, conf, omega, cls, mode, z_range)
-        pc.points, pc.colors, pc.point_size = pts, cols, psize.value
+            pc.points, pc.colors, pc.point_size = np.zeros((1, 3), np.float32), np.zeros((1, 3), np.uint8), psize.value
+            return
+        pc.points, pc.colors, pc.point_size = pts, colorize(pts, conf, omega, cls, mode, z_range), psize.value
 
         present_classes = sorted(int(c) for c in np.unique(cls)) if cls is not None else []
-        present = ", ".join(CLASS_NAMES[c] for c in present_classes if c != 17)
+        named = ", ".join(("free/unlabeled" if c == FREE_CLASS else CLASS_NAMES[c]) for c in present_classes)
         scalar_range = z_range if mode == "height" else (0.0, 1.0)
-        update_legend(mode, [c for c in present_classes if c != 17] or present_classes, scalar_range)
+        update_legend(mode, present_classes, scalar_range)
         info.content = (
             f"### Sample {state['idx'] + 1}/{len(samples)}\n"
             f"**scene:** `{s['scene']}`\n\n**token:** `{s['token']}`\n\n"
             f"**occupied voxels:** {len(pts):,}\n\n"
             f"**mean m_omega:** {float(omega.mean()):.3f}\n\n"
-            f"**Occ3D classes:** {present or '(run occ3d-transfer)'}"
+            f"**Occ3D classes:** {named or '(run occ3d-transfer)'}"
         )
         print(f"sample {state['idx']+1}/{len(samples)}: {s['scene']}/{s['token']} occ={len(pts)} mode={mode}")
 
@@ -238,6 +333,7 @@ def main():
         state["idx"] = int(np.clip(i, 0, len(samples) - 1))
         sld.value = state["idx"]
         render()
+        update_cameras()
 
     @prev_b.on_click
     def _(_):
@@ -251,7 +347,7 @@ def main():
     def _(_):
         show(int(sld.value))
 
-    for ctrl in (p_fn_sld, p_fp_sld, color_mode, psize):
+    for ctrl in (p_fn_sld, p_fp_sld, color_mode, hide_free, psize):
         ctrl.on_update(lambda _: render())
 
     show(0)
