@@ -397,6 +397,10 @@ class NuscenesDataset:
         """Loads the per-voxel OOD score + source bitmask + synthetic-anomaly mask."""
         return self._load_label_stage(scene, "ood", root_path)
 
+    def load_locc_transfer(self, scene: pl.DataFrame, root_path: Optional[Union[Path, str]] = None):
+        """Loads the per-voxel LOcc open-vocabulary class (CLIP features live in locc_clip/*.npz)."""
+        return self._load_label_stage(scene, "locc_transfer", root_path)
+
     def load_scene_flow_polars(self, scene: pl.DataFrame, root_path: Optional[Union[Path, str]] = None):
         """Loads scene flow information."""
         root_path = Path(root_path) if root_path is not None else self.extra_data_root

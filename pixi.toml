@@ -40,6 +40,7 @@ occupancy-export = "python -m scene_reconstruction.cli.main export ./conf defaul
 occ3d-transfer = "python -m scene_reconstruction.cli.main export ./conf default occ3d-transfer"
 box-semantics = "python -m scene_reconstruction.cli.main export ./conf default box-semantics"
 ood = "python -m scene_reconstruction.cli.main export ./conf default ood"
+locc-transfer = "python -m scene_reconstruction.cli.main export ./conf default locc-transfer"
 labels-core = { depends-on = ["data-processing", "occupancy-export", "occ3d-transfer", "box-semantics"] }
 check-labels = "python -m scene_reconstruction.cli.main check ./conf default labels"
 validate = "python -m scene_reconstruction.cli.main check ./conf default validate"
@@ -49,6 +50,7 @@ occupancy-export-full = "python -m scene_reconstruction.cli.main export ./conf f
 occ3d-transfer-full = "python -m scene_reconstruction.cli.main export ./conf full occ3d-transfer"
 box-semantics-full = "python -m scene_reconstruction.cli.main export ./conf full box-semantics"
 ood-full = "python -m scene_reconstruction.cli.main export ./conf full ood"
+locc-transfer-full = "python -m scene_reconstruction.cli.main export ./conf full locc-transfer"
 labels-core-full = { depends-on = ["data-processing-full", "occupancy-export-full", "occ3d-transfer-full", "box-semantics-full"] }
 # Master one-shot chain (extended as later stages land).
 dataset-all = { depends-on = ["labels-core-full"] }

@@ -38,6 +38,7 @@ STEP_NODES = {
     "occ3d-transfer": "export.occ3d_transfer",
     "box-semantics": "export.box_semantics",
     "ood": "export.ood",
+    "locc-transfer": "export.locc_transfer",
 }
 # No-external-dependency stages that always run end-to-end per shard.
 DEFAULT_STEPS = [
