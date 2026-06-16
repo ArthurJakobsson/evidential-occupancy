@@ -1,18 +1,20 @@
 """OOD annotation layer for the evidential occupancy dataset.
 
-Produces a per-key-frame OOD score + source bitmask, kept SEPARATE from the clean semantic
-labels. The score fuses up to three signals (whichever are available):
+A per-key-frame OOD score + source bitmask, kept SEPARATE from the clean semantic labels and
+gated to OUR occupied voxels. It fuses the independent signals that are available:
 
-  * epistemic uncertainty (the Dempster-Shafer ignorance mass ``m_omega`` from the evidence
-    stage) -- a training-free OOD signal: low evidence -> more anomalous;
-  * EchoOOD (ProOOD): an optional per-voxel score grid exported under ``<extra>/echo_ood/``
-    by running ProOOD on a trained occupancy model (gated -- absent until that is run);
-  * synthetic anomaly injection (OccOoD-style): deterministically placed anomaly blobs that
-    give known-positive OOD ground truth for the benchmark. OFF by default
-    (``num_synthetic_anomalies=0``) -- it is benchmark construction, not a clean label.
+  * geometry novelty -- our occupied surface that is far from any Occ3D class
+    (``fill_distance`` from the occ3d-transfer stage). This is the discriminative signal:
+    ~0 on Occ3D surfaces, high where our lidar geometry has structure Occ3D lacks.
+  * synthetic injection (OccOoD-style) -- deterministically placed anomaly blobs that give
+    known-positive OOD ground truth for the benchmark. OFF by default.
+  * EchoOOD (ProOOD) -- an optional per-voxel score grid under ``<extra>/echo_ood/`` from
+    running ProOOD on a trained model (gated; absent until that is run).
 
-``ood_source`` is a bitmask: bit0 = high uncertainty (m_omega>tau), bit1 = synthetic,
-bit2 = EchoOOD. ``is_synthetic`` marks the injected anomaly voxels.
+Epistemic uncertainty ``m_omega`` (lidar-evidence ignorance) is HIGH almost everywhere, so it
+is NOT fused into the score (it would flood it); instead it is recorded in ``source`` (bit0)
+and remains recoverable from the evidence stage. ``ood_source`` bits: 1=uncertain,
+2=synthetic, 4=echo, 8=novelty. ``ood_score`` = max(novelty, synthetic, echo), in [0,1].
 """
 
 from __future__ import annotations
@@ -32,18 +34,22 @@ from scene_reconstruction.data.nuscenes.polars_helpers import series_to_torch, t
 SRC_UNCERTAIN = 1
 SRC_SYNTHETIC = 2
 SRC_ECHO = 4
+SRC_NOVELTY = 8
 
 
 @dataclass
 class OodFusion:
-    """Fuse epistemic uncertainty (+ optional EchoOOD / synthetic injection) into an OOD layer."""
+    """Fuse geometry-novelty (+ optional EchoOOD / synthetic) into an OOD layer; record uncertainty."""
 
     ds: NuscenesDataset
     extra_data_root: Union[Path, str]
     evidence_name: str = "evidence"
+    occ3d_transfer_name: str = "occ3d_transfer"
     echo_ood_name: str = "echo_ood"
     name: str = "ood"
     uncertainty_threshold: float = 0.6
+    novelty_scale: float = 2.0  # metres; fill_distance / novelty_scale, clamped to [0, 1]
+    novelty_threshold: float = 0.5
     num_synthetic_anomalies: int = 0
     anomaly_radius_vox: int = 3
     seed_base: int = 0
@@ -54,25 +60,23 @@ class OodFusion:
     def evidence_dir(self, scene_name: str) -> Path:
         return Path(self.extra_data_root) / self.evidence_name / scene_name / "LIDAR_TOP"
 
-    def echo_path(self, scene_name: str, token: str) -> Path:
-        return Path(self.extra_data_root) / self.echo_ood_name / scene_name / "LIDAR_TOP" / f"{token}.arrow"
+    def _stage_path(self, stage: str, scene_name: str, token: str) -> Path:
+        return Path(self.extra_data_root) / stage / scene_name / "LIDAR_TOP" / f"{token}.arrow"
 
     def save_path(self, scene_name: str, token: str) -> Path:
-        path = Path(self.extra_data_root) / self.name / scene_name / "LIDAR_TOP" / f"{token}.arrow"
+        path = self._stage_path(self.name, scene_name, token)
         path.parent.mkdir(exist_ok=True, parents=True)
         return path
 
     def _inject_synthetic(self, occupied: torch.Tensor, token: str) -> torch.Tensor:
         """Deterministically place anomaly cubes at occupied voxels; returns a bool mask [X,Y,Z]."""
         mask = torch.zeros_like(occupied, dtype=torch.bool)
-        occ_idx = occupied.nonzero(as_tuple=False)  # [M, 3]
+        occ_idx = occupied.nonzero(as_tuple=False)
         if occ_idx.shape[0] == 0:
             return mask
         rng = np.random.RandomState((hash(token) ^ (self.seed_base * 2654435761)) & 0xFFFFFFFF)
-        choices = rng.randint(0, occ_idx.shape[0], size=self.num_synthetic_anomalies)
         r = self.anomaly_radius_vox
-        X, Y, Z = occupied.shape
-        for c in choices:
+        for c in rng.randint(0, occ_idx.shape[0], size=self.num_synthetic_anomalies):
             cx, cy, cz = (int(v) for v in occ_idx[c])
             mask[max(cx - r, 0):cx + r + 1, max(cy - r, 0):cy + r + 1, max(cz - r, 0):cz + r + 1] = True
         return mask
@@ -88,27 +92,38 @@ class OodFusion:
                 continue
             ev = pl.read_ipc(filename, memory_map=False)
             belief = series_to_torch(ev[f"LIDAR_TOP.{self.evidence_name}.belief"])[0].float()  # [3, X, Y, Z]
-            occupied = series_to_torch(ev[f"LIDAR_TOP.{self.evidence_name}.occupied"])[0].bool()  # [X, Y, Z]
+            occupied = series_to_torch(ev[f"LIDAR_TOP.{self.evidence_name}.occupied"])[0].bool()
+            occ_f = occupied.float()
             m_omega = belief[2].clamp(0.0, 1.0)
 
-            score = m_omega.clone()  # [X, Y, Z] in [0, 1]
-            source = torch.where(m_omega > self.uncertainty_threshold, SRC_UNCERTAIN, 0).to(torch.uint8)
+            score = torch.zeros_like(m_omega)
+            source = (occupied & (m_omega > self.uncertainty_threshold)).to(torch.uint8) * SRC_UNCERTAIN
 
-            echo_path = self.echo_path(scene_name, token)
+            ot_path = self._stage_path(self.occ3d_transfer_name, scene_name, token)
+            if ot_path.exists():
+                fdist = series_to_torch(pl.read_ipc(ot_path, memory_map=False)[
+                    f"LIDAR_TOP.{self.occ3d_transfer_name}.fill_distance"])[0].float()
+                novelty = (fdist / self.novelty_scale).clamp(0.0, 1.0) * occ_f
+                score = torch.maximum(score, novelty)
+                source = source | (novelty > self.novelty_threshold).to(torch.uint8) * SRC_NOVELTY
+
+            echo_path = self._stage_path(self.echo_ood_name, scene_name, token)
             if echo_path.exists():
-                echo = series_to_torch(pl.read_ipc(echo_path, memory_map=False)["LIDAR_TOP.echo_ood.score"])[0].float()
+                echo = series_to_torch(pl.read_ipc(echo_path, memory_map=False)[
+                    "LIDAR_TOP.echo_ood.score"])[0].float() * occ_f
                 score = torch.maximum(score, echo)
-                source = source | torch.where(echo > self.uncertainty_threshold, SRC_ECHO, 0).to(torch.uint8)
+                source = source | (echo > self.uncertainty_threshold).to(torch.uint8) * SRC_ECHO
 
             is_syn = torch.zeros_like(occupied, dtype=torch.uint8)
             if self.num_synthetic_anomalies > 0:
-                syn_mask = self._inject_synthetic(occupied, token)
-                is_syn = syn_mask.to(torch.uint8)
-                score = torch.where(syn_mask, torch.ones_like(score), score)
-                source = source | (syn_mask.to(torch.uint8) * SRC_SYNTHETIC)
+                syn = self._inject_synthetic(occupied, token)
+                is_syn = syn.to(torch.uint8)
+                score = torch.where(syn, torch.ones_like(score), score)
+                source = source | (syn.to(torch.uint8) * SRC_SYNTHETIC)
 
+            score = (score * occ_f).clamp(0.0, 1.0)
             out_df = ev.select("LIDAR_TOP.sample_data.token").with_columns(
-                torch_to_series(f"LIDAR_TOP.{self.name}.score", score.clamp(0.0, 1.0)[None]),
+                torch_to_series(f"LIDAR_TOP.{self.name}.score", score[None]),
                 torch_to_series(f"LIDAR_TOP.{self.name}.source", source[None]),
                 torch_to_series(f"LIDAR_TOP.{self.name}.is_synthetic", is_syn[None]),
             )

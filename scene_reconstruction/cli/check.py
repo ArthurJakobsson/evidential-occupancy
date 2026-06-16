@@ -104,9 +104,10 @@ def labels(ctx: typer.Context, num_samples: int = 5) -> None:
             is_syn = series_to_torch(od["LIDAR_TOP.ood.is_synthetic"])[0]
             assert tuple(score.shape) == SHAPE and tuple(src.shape) == SHAPE, "ood shape mismatch"
             assert float(score.min()) >= 0.0 and float(score.max()) <= 1.0, "ood score out of [0,1]"
-            assert int(src.max()) <= 7, "ood source bitmask out of range"
+            assert int(src.max()) <= 15, "ood source bitmask out of range"
             assert bool((score[is_syn.bool()] == 1.0).all()) if bool(is_syn.any()) else True, "synthetic != score 1"
-            ood_info = f"mean@occ={float(score[occupied.bool()].mean()):.2f} synth={int(is_syn.sum())}"
+            n_nov = int(((src.int() & 8) > 0).sum())
+            ood_info = f"mean@occ={float(score[occupied.bool()].mean()):.2f} novel={n_nov} synth={int(is_syn.sum())}"
 
         print(
             f"OK {scene_name}/{token[:8]} occ={int(occupied.bool().sum()):>6} "

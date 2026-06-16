@@ -41,8 +41,9 @@ UPPER_COL = f"{RT_COL}.volume.upper"
 CLASS_NAMES = list(occupancy_to_color.keys())  # index -> name, 0=other .. 17=free
 FREE_CLASS = 17
 FREE_GRAY = np.array([120, 120, 120], dtype=np.uint8)  # how we show occupied-but-unlabeled voxels
-COLOR_MODES = ("height", "confidence", "uncertainty", "occ3d_class", "box_class")
+COLOR_MODES = ("height", "confidence", "uncertainty", "occ3d_class", "box_class", "ood")
 BG_GRAY = np.array([50, 50, 50], dtype=np.uint8)  # background (no box) in box_class mode
+SYN_MAGENTA = np.array([255, 0, 255], dtype=np.uint8)  # synthetic anomaly in ood mode
 # surround cameras, laid out front row then back row
 CAM_ORDER = ["CAM_FRONT_LEFT", "CAM_FRONT", "CAM_FRONT_RIGHT", "CAM_BACK_LEFT", "CAM_BACK", "CAM_BACK_RIGHT"]
 
@@ -87,6 +88,17 @@ def _maybe_load_box(labels_root: Path, scene: str, token: str) -> torch.Tensor |
     return series_to_torch(df["LIDAR_TOP.box_semantics.category_index"])[0].to(torch.int64)
 
 
+def _maybe_load_ood(labels_root: Path, scene: str, token: str):
+    """(ood_score, is_synthetic) [X,Y,Z] from the ood stage, or (None, None)."""
+    f = labels_root / "ood" / scene / "LIDAR_TOP" / f"{token}.arrow"
+    if not f.exists():
+        return None, None
+    df = pl.read_ipc(f, memory_map=False)
+    score = series_to_torch(df["LIDAR_TOP.ood.score"])[0].float()
+    is_syn = series_to_torch(df["LIDAR_TOP.ood.is_synthetic"])[0].bool()
+    return score, is_syn
+
+
 def load_sample(path: Path, labels_root: Path | None):
     """Load one key-frame: RT volume, bounds, scene/token, and optional label grids."""
     df = pl.read_ipc(path, memory_map=False)
@@ -97,8 +109,9 @@ def load_sample(path: Path, labels_root: Path | None):
     scene = path.parent.parent.name
     sem, fdist = _maybe_load_occ3d(labels_root, scene, token) if labels_root is not None else (None, None)
     box = _maybe_load_box(labels_root, scene, token) if labels_root is not None else None
+    ood_score, ood_syn = _maybe_load_ood(labels_root, scene, token) if labels_root is not None else (None, None)
     return {"rt": rt, "lower": lower, "upper": upper, "scene": scene, "token": token,
-            "sem": sem, "fdist": fdist, "box": box}
+            "sem": sem, "fdist": fdist, "box": box, "ood_score": ood_score, "ood_syn": ood_syn}
 
 
 def occ3d_source_points(sample):
@@ -125,7 +138,9 @@ def occupancy(sample, p_fn, p_fp):
     omega = m_omega[occ].numpy().astype(np.float32)
     cls = sample["sem"][occ].numpy().astype(np.int64) if sample["sem"] is not None else None
     box = sample["box"][occ].numpy().astype(np.int64) if sample["box"] is not None else None
-    return pts, conf, omega, cls, box
+    ood = sample["ood_score"][occ].numpy().astype(np.float32) if sample["ood_score"] is not None else None
+    ood_syn = sample["ood_syn"][occ].numpy() if sample["ood_syn"] is not None else None
+    return pts, conf, omega, cls, box, ood, ood_syn
 
 
 def class_colors(cls: np.ndarray) -> np.ndarray:
@@ -142,12 +157,17 @@ def box_colors(box: np.ndarray) -> np.ndarray:
     return cols
 
 
-def colorize(pts, conf, omega, cls, mode, z_range, box=None) -> np.ndarray:
+def colorize(pts, conf, omega, cls, mode, z_range, box=None, ood=None, ood_syn=None) -> np.ndarray:
     """Map per-point scalars/classes -> uint8 RGB."""
     if mode == "occ3d_class" and cls is not None:
         return class_colors(cls)
     if mode == "box_class" and box is not None:
         return box_colors(box)
+    if mode == "ood" and ood is not None:
+        cols = (mpl.colormaps["turbo"](np.clip(ood, 0.0, 1.0))[:, :3] * 255).astype(np.uint8)
+        if ood_syn is not None:
+            cols[ood_syn.astype(bool)] = SYN_MAGENTA  # synthetic anomalies stand out
+        return cols
     if mode == "uncertainty":
         return (mpl.colormaps["turbo"](np.clip(omega, 0.0, 1.0))[:, :3] * 255).astype(np.uint8)
     if mode == "confidence":
@@ -158,8 +178,9 @@ def colorize(pts, conf, omega, cls, mode, z_range, box=None) -> np.ndarray:
 
 
 # colormap + scalar-field label per scalar color mode (must match `colorize`)
-SCALAR_CMAP = {"uncertainty": "turbo", "confidence": "viridis", "height": "turbo"}
-SCALAR_LABEL = {"uncertainty": "m_omega (epistemic uncertainty)", "confidence": "m_o - m_f", "height": "height z (m)"}
+SCALAR_CMAP = {"uncertainty": "turbo", "confidence": "viridis", "height": "turbo", "ood": "turbo"}
+SCALAR_LABEL = {"uncertainty": "m_omega (epistemic uncertainty)", "confidence": "m_o - m_f",
+                "height": "height z (m)", "ood": "OOD score (synthetic = magenta)"}
 
 
 def legend_image(mode: str, present_classes: list[int], scalar_range: tuple[float, float]) -> np.ndarray:
@@ -360,9 +381,10 @@ def main():
             )
             print(f"sample {state['idx']+1}/{len(samples)}: ORIGINAL Occ3D voxels={len(pts)}")
             return
-        pts, conf, omega, cls, box = occupancy(s, p_fn_sld.value, p_fp_sld.value)
+        pts, conf, omega, cls, box, ood, ood_syn = occupancy(s, p_fn_sld.value, p_fp_sld.value)
         mode = color_mode.value
-        if (mode == "occ3d_class" and cls is None) or (mode == "box_class" and box is None):
+        if ((mode == "occ3d_class" and cls is None) or (mode == "box_class" and box is None)
+                or (mode == "ood" and ood is None)):
             mode = "height"
         active = cls if mode == "occ3d_class" else (box if mode == "box_class" else None)
         if hide_free.value and active is not None:
@@ -371,11 +393,14 @@ def main():
             pts, conf, omega = pts[keep], conf[keep], omega[keep]
             cls = cls[keep] if cls is not None else None
             box = box[keep] if box is not None else None
+            ood = ood[keep] if ood is not None else None
+            ood_syn = ood_syn[keep] if ood_syn is not None else None
             active = active[keep]
         if len(pts) == 0:
             pc.points, pc.colors, pc.point_size = np.zeros((1, 3), np.float32), np.zeros((1, 3), np.uint8), psize.value
             return
-        pc.points, pc.colors, pc.point_size = pts, colorize(pts, conf, omega, cls, mode, z_range, box), psize.value
+        pc.points, pc.colors, pc.point_size = (
+            pts, colorize(pts, conf, omega, cls, mode, z_range, box, ood, ood_syn), psize.value)
 
         present_classes = sorted(int(c) for c in np.unique(active)) if active is not None else []
 
@@ -388,6 +413,9 @@ def main():
         scalar_range = z_range if mode == "height" else (0.0, 1.0)
         update_legend(mode, present_classes, scalar_range)
         label = {"occ3d_class": "Occ3D classes", "box_class": "box classes"}.get(mode, "classes")
+        if mode == "ood":
+            label = "OOD"
+            named = f"mean {float(ood.mean()):.2f}, synthetic {int(ood_syn.sum()) if ood_syn is not None else 0}"
         info.content = (
             f"### Sample {state['idx'] + 1}/{len(samples)}\n"
             f"**scene:** `{s['scene']}`\n\n**token:** `{s['token']}`\n\n"
