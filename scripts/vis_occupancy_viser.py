@@ -66,25 +66,38 @@ def pick_samples(files: list[Path], num_samples: int) -> list[Path]:
     return picked
 
 
-def _maybe_load_semantics(labels_root: Path, scene: str, token: str) -> torch.Tensor | None:
-    """Occ3D-transfer semantics [X,Y,Z] for this token, or None if not generated."""
+def _maybe_load_occ3d(labels_root: Path, scene: str, token: str):
+    """(semantics, fill_distance) [X,Y,Z] from occ3d-transfer, or (None, None) if not generated."""
     f = labels_root / "occ3d_transfer" / scene / "LIDAR_TOP" / f"{token}.arrow"
     if not f.exists():
-        return None
+        return None, None
     df = pl.read_ipc(f, memory_map=False)
-    return series_to_torch(df["LIDAR_TOP.occ3d_transfer.semantics"])[0].to(torch.int64)  # [X,Y,Z]
+    sem = series_to_torch(df["LIDAR_TOP.occ3d_transfer.semantics"])[0].to(torch.int64)
+    fdist = series_to_torch(df["LIDAR_TOP.occ3d_transfer.fill_distance"])[0].float()
+    return sem, fdist
 
 
 def load_sample(path: Path, labels_root: Path | None):
-    """Load one key-frame: RT volume, bounds, scene/token, and optional Occ3D semantics."""
+    """Load one key-frame: RT volume, bounds, scene/token, and optional Occ3D semantics/fill-distance."""
     df = pl.read_ipc(path, memory_map=False)
     rt = series_to_torch(df[RT_COL])[0].float()  # [2, X, Y, Z]
     lower = series_to_torch(df[LOWER_COL])[0].float()
     upper = series_to_torch(df[UPPER_COL])[0].float()
     token = df["LIDAR_TOP.sample_data.token"].item()
     scene = path.parent.parent.name
-    sem = _maybe_load_semantics(labels_root, scene, token) if labels_root is not None else None
-    return {"rt": rt, "lower": lower, "upper": upper, "scene": scene, "token": token, "sem": sem}
+    sem, fdist = _maybe_load_occ3d(labels_root, scene, token) if labels_root is not None else (None, None)
+    return {"rt": rt, "lower": lower, "upper": upper, "scene": scene, "token": token, "sem": sem, "fdist": fdist}
+
+
+def occ3d_source_points(sample):
+    """Original Occ3D occupancy = voxels with fill_distance==0 (real Occ3D voxels), + their class."""
+    sem, fdist = sample["sem"], sample["fdist"]
+    if sem is None or fdist is None:
+        return None
+    mask = fdist == 0  # the densified field marks real Occ3D voxels with distance 0
+    volume = Volume.new_volume(sample["lower"].tolist(), sample["upper"].tolist())
+    grid = volume.new_coord_grid(tuple(sem.shape))[0]  # [X, Y, Z, 3]
+    return grid[mask].numpy().astype(np.float32), sem[mask].numpy().astype(np.int64)
 
 
 def occupancy(sample, p_fn, p_fp):
@@ -268,6 +281,7 @@ def main():
         default_mode = "occ3d_class" if have_sem else "height"
         color_mode = server.gui.add_dropdown("Color by", options=COLOR_MODES, initial_value=default_mode)
         hide_free = server.gui.add_checkbox("Hide free/unlabeled", initial_value=False)
+        show_orig = server.gui.add_checkbox("Show original Occ3D", initial_value=False)
         psize = server.gui.add_slider("Point size", min=0.02, max=0.4, step=0.01, initial_value=args.point_size)
     legend_folder = server.gui.add_folder("Color guide")
     cam_folder = server.gui.add_folder("Source cameras") if cam_enabled else None
@@ -304,6 +318,22 @@ def main():
 
     def render():
         s = samples[state["idx"]]
+        if show_orig.value and s["fdist"] is not None:
+            pts, cls = occ3d_source_points(s)
+            if len(pts) == 0:
+                pc.points, pc.colors, pc.point_size = np.zeros((1, 3), np.float32), np.zeros((1, 3), np.uint8), psize.value
+                return
+            pc.points, pc.colors, pc.point_size = pts, class_colors(cls), psize.value
+            present_classes = sorted(int(c) for c in np.unique(cls))
+            update_legend("occ3d_class", present_classes, (0.0, 1.0))
+            named = ", ".join(("free/unlabeled" if c == FREE_CLASS else CLASS_NAMES[c]) for c in present_classes)
+            info.content = (
+                f"### Sample {state['idx'] + 1}/{len(samples)} — **original Occ3D (source GT)**\n"
+                f"**scene:** `{s['scene']}`\n\n**token:** `{s['token']}`\n\n"
+                f"**Occ3D voxels:** {len(pts):,} (0.4 m)\n\n**classes:** {named}"
+            )
+            print(f"sample {state['idx']+1}/{len(samples)}: ORIGINAL Occ3D voxels={len(pts)}")
+            return
         pts, conf, omega, cls = occupancy(s, p_fn_sld.value, p_fp_sld.value)
         mode = color_mode.value
         if mode == "occ3d_class" and cls is None:
@@ -347,7 +377,7 @@ def main():
     def _(_):
         show(int(sld.value))
 
-    for ctrl in (p_fn_sld, p_fp_sld, color_mode, hide_free, psize):
+    for ctrl in (p_fn_sld, p_fp_sld, color_mode, hide_free, show_orig, psize):
         ctrl.on_update(lambda _: render())
 
     show(0)

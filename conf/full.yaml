@@ -113,7 +113,7 @@ export:
       key_frames_only: true
     extra_data_root: ${oc.env:NUSCENES_EXTRA_ROOT,data/nuscenes_extra}
     occ3d_root: ${oc.env:NUSCENES_EXTRA_ROOT,data/nuscenes_extra}
-    fill_radius_m: 1.2
+    max_fill_distance_m: null   # null = label every voxel with its nearest Occ3D class
     missing_only: true
     scene_offset: 0
     num_scenes: null

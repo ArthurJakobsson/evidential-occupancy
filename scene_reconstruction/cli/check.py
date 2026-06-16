@@ -58,23 +58,19 @@ def labels(ctx: typer.Context, num_samples: int = 5) -> None:
         if ot.exists():
             otd = pl.read_ipc(ot, memory_map=False)
             sem = series_to_torch(otd["LIDAR_TOP.occ3d_transfer.semantics"])[0]  # [400,400,32]
-            assert tuple(sem.shape) == SHAPE, f"semantics shape {tuple(sem.shape)}"
+            fdist = series_to_torch(otd["LIDAR_TOP.occ3d_transfer.fill_distance"])[0].float()  # [400,400,32]
+            assert tuple(sem.shape) == SHAPE and tuple(fdist.shape) == SHAPE, "occ3d shape mismatch"
             assert int(sem.min()) >= 0 and int(sem.max()) <= 17, "semantics out of 0..17"
-            # 2x2x2 block consistency for non-filled voxels: a block whose 8 voxels are all
-            # free/non-occupied must share one class (upsample invariant before nearest-fill).
+            assert float(fdist.min()) >= 0.0, "negative fill_distance"
+            # densified field: every 2x2x2 evidential block maps to one Occ3D voxel -> one class.
             blocks = sem.reshape(200, 2, 200, 2, 16, 2).permute(0, 2, 4, 1, 3, 5).reshape(200, 200, 16, 8)
-            occ_blocks = occupied.bool().reshape(200, 2, 200, 2, 16, 2).permute(0, 2, 4, 1, 3, 5).reshape(
-                200, 200, 16, 8
-            )
-            empty_block = ~occ_blocks.any(-1)
-            consistent = (blocks == blocks[..., :1]).all(-1)
-            assert bool((consistent | ~empty_block).all()), "empty 2x2x2 blocks are not class-consistent"
+            assert bool((blocks == blocks[..., :1]).all()), "2x2x2 blocks are not class-consistent"
             occ_mask = occupied.bool()
             labeled = ((sem != 0) & (sem != 17) & occ_mask).sum().item()
-            n_occ = int(occ_mask.sum())
-            frac = labeled / max(n_occ, 1)
-            classes = sorted(int(c) for c in sem.unique().tolist())
-            sem_info = f"classes={classes} labeled-occ={frac:.0%}"
+            frac = labeled / max(int(occ_mask.sum()), 1)
+            fo = fdist[occ_mask]
+            mean_fill = float(fo[fo.isfinite()].mean()) if bool(fo.isfinite().any()) else float("inf")
+            sem_info = f"labeled-occ={frac:.0%} mean_fill={mean_fill:.2f}m"
 
         print(
             f"OK {scene_name}/{token[:8]} occ={int(occupied.bool().sum()):>6} "
