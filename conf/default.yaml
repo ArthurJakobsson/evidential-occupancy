@@ -64,3 +64,34 @@ export:
       max_ego_pose_difference: 20.0
       device: cuda
       num_threads: 8
+
+  # ---- label stages ----
+  evidence_export:
+    _target_: scene_reconstruction.occupancy.evidence_export.EvidenceExport
+    ds:
+      _target_: scene_reconstruction.data.nuscenes.dataset.NuscenesDataset
+      data_root: data/nuscenes
+      extra_data_root: data/nuscenes_extra
+      version: v1.0-mini
+      key_frames_only: true
+    extra_data_root: data/nuscenes_extra
+    p_fn: 0.8
+    p_fp: 0.2
+    missing_only: false
+    scene_offset: 0
+    num_scenes: null
+
+  occ3d_transfer:
+    _target_: scene_reconstruction.labels.occ3d_transfer.Occ3dTransfer
+    ds:
+      _target_: scene_reconstruction.data.nuscenes.dataset.NuscenesDataset
+      data_root: data/nuscenes
+      extra_data_root: data/nuscenes_extra
+      version: v1.0-mini
+      key_frames_only: true
+    extra_data_root: data/nuscenes_extra
+    occ3d_root: data/nuscenes_extra
+    fill_radius_m: 1.2
+    missing_only: false
+    scene_offset: 0
+    num_scenes: null

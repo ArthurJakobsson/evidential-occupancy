@@ -6,6 +6,8 @@ from hydra.utils import instantiate
 
 from scene_reconstruction.cli.config import make_cfg
 from scene_reconstruction.data.nuscenes.scene_flow import SceneFlow
+from scene_reconstruction.labels.occ3d_transfer import Occ3dTransfer
+from scene_reconstruction.occupancy.evidence_export import EvidenceExport
 from scene_reconstruction.occupancy.temporal_transmission_and_reflection import TemporalTransmissionAndReflection
 from scene_reconstruction.occupancy.transmission_reflection import ReflectionTransmissionSpherical
 
@@ -45,6 +47,24 @@ def scene_flow(ctx: typer.Context) -> None:
 
     scene_flow: SceneFlow = instantiate(cfg.export.scene_flow)
     scene_flow.process_data()
+
+
+@app.command(name="occupancy-export")
+def occupancy_export(ctx: typer.Context) -> None:
+    """Derive occupancy + per-voxel epistemic uncertainty (Dempster-Shafer belief) from accumulated evidence."""
+    cfg = ctx.meta["cfg"]
+
+    evidence_export: EvidenceExport = instantiate(cfg.export.evidence_export)
+    evidence_export.process_data()
+
+
+@app.command(name="occ3d-transfer")
+def occ3d_transfer(ctx: typer.Context) -> None:
+    """Transfer Occ3D semantic class labels onto the evidential geometry (nearest-class)."""
+    cfg = ctx.meta["cfg"]
+
+    occ3d_transfer: Occ3dTransfer = instantiate(cfg.export.occ3d_transfer)
+    occ3d_transfer.process_data()
 
 
 @app.command(name="sensor-belief-maps", no_args_is_help=True)

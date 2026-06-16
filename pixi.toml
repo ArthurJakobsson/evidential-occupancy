@@ -34,6 +34,18 @@ data-processing-full = { depends-on = [
     "scene-flow-full",
     "temporal-accumulation-full",
 ] }
+# Label stages (mini: ./conf default). occupancy-export needs temporal-accumulation;
+# occ3d-transfer needs occupancy-export + the Occ3D symlink (see SETUP_L40S.md).
+occupancy-export = "python -m scene_reconstruction.cli.main export ./conf default occupancy-export"
+occ3d-transfer = "python -m scene_reconstruction.cli.main export ./conf default occ3d-transfer"
+labels-core = { depends-on = ["data-processing", "occupancy-export", "occ3d-transfer"] }
+check-labels = "python -m scene_reconstruction.cli.main check ./conf default labels"
+# Label stages (full: v1.0-trainval, env-var paths).
+occupancy-export-full = "python -m scene_reconstruction.cli.main export ./conf full occupancy-export"
+occ3d-transfer-full = "python -m scene_reconstruction.cli.main export ./conf full occ3d-transfer"
+labels-core-full = { depends-on = ["data-processing-full", "occupancy-export-full", "occ3d-transfer-full"] }
+# Master one-shot chain (extended as later stages land).
+dataset-all = { depends-on = ["labels-core-full"] }
 # Evaluation
 eval-bba04 = "python -m scene_reconstruction.cli.main eval ./conf bba04 render-lidar-depth"
 eval-bba = "python -m scene_reconstruction.cli.main eval ./conf bba render-lidar-depth"

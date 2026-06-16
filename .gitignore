@@ -17,3 +17,5 @@ __pycache__/
 
 # multi-GPU run logs
 /logs
+
+notes.md

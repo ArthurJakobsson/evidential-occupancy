@@ -366,6 +366,29 @@ class NuscenesDataset:
         scene = scene.lazy().join(df, on="LIDAR_TOP.sample_data.token", validate="1:1", how="left").collect()
         return scene
 
+    def _load_label_stage(self, scene: pl.DataFrame, stage_dir: str, root_path: Optional[Union[Path, str]] = None):
+        """Generic loader for a per-keyframe label stage written under ``<root>/<stage_dir>/...``."""
+        root_path = Path(root_path) if root_path is not None else self.extra_data_root
+
+        def make_filename(x):
+            scene_name, lidar_token = x
+            return root_path / stage_dir / scene_name / "LIDAR_TOP" / f"{lidar_token}.arrow"
+
+        filenames = list(
+            map(make_filename, scene.select("scene.name", "LIDAR_TOP.sample_data.token").iter_rows())
+        )
+        df = pl.scan_ipc(filenames, memory_map=False)
+        scene = scene.lazy().join(df, on="LIDAR_TOP.sample_data.token", validate="1:1", how="left").collect()
+        return scene
+
+    def load_evidence(self, scene: pl.DataFrame, root_path: Optional[Union[Path, str]] = None):
+        """Loads per-voxel occupancy + Dempster-Shafer belief masses (m_o, m_f, m_omega)."""
+        return self._load_label_stage(scene, "evidence", root_path)
+
+    def load_occ3d_transfer(self, scene: pl.DataFrame, root_path: Optional[Union[Path, str]] = None):
+        """Loads Occ3D semantic classes transferred onto the evidential geometry."""
+        return self._load_label_stage(scene, "occ3d_transfer", root_path)
+
     def load_scene_flow_polars(self, scene: pl.DataFrame, root_path: Optional[Union[Path, str]] = None):
         """Loads scene flow information."""
         root_path = Path(root_path) if root_path is not None else self.extra_data_root
