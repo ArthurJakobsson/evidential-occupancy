@@ -42,6 +42,8 @@ box-semantics = "python -m scene_reconstruction.cli.main export ./conf default b
 ood = "python -m scene_reconstruction.cli.main export ./conf default ood"
 labels-core = { depends-on = ["data-processing", "occupancy-export", "occ3d-transfer", "box-semantics"] }
 check-labels = "python -m scene_reconstruction.cli.main check ./conf default labels"
+validate = "python -m scene_reconstruction.cli.main check ./conf default validate"
+manifest = "python -m scene_reconstruction.cli.main check ./conf default manifest"
 # Label stages (full: v1.0-trainval, env-var paths).
 occupancy-export-full = "python -m scene_reconstruction.cli.main export ./conf full occupancy-export"
 occ3d-transfer-full = "python -m scene_reconstruction.cli.main export ./conf full occ3d-transfer"

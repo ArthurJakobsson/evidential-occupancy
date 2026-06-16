@@ -117,6 +117,71 @@ def labels(ctx: typer.Context, num_samples: int = 5) -> None:
     print(f"\nchecked {checked} key-frames — all assertions passed")
 
 
+@app.command(name="validate")
+def validate(ctx: typer.Context, num_bins: int = 10, max_frames: int = 0) -> None:
+    """Compare our occupancy vs Occ3D (IoU/precision/recall) + uncertainty calibration.
+
+    Occ3D occupancy is recovered from occ3d-transfer as the real Occ3D voxels
+    (fill_distance==0). "Error" for calibration = our occupied voxel that Occ3D does not
+    have (geometry beyond Occ3D) -- a documented proxy, not absolute ground truth.
+    """
+    cfg = ctx.meta["cfg"]
+    extra = Path(str(cfg.export.evidence_export.extra_data_root))
+    ev_files = sorted((extra / "evidence").glob("*/LIDAR_TOP/*.arrow"))
+    if max_frames > 0:
+        ev_files = ev_files[:max_frames]
+    if not ev_files:
+        raise SystemExit("no evidence files — run occupancy-export first")
+
+    tot_i = tot_u = tot_pred = tot_gt = 0
+    bin_n = torch.zeros(num_bins)
+    bin_u = torch.zeros(num_bins)
+    bin_err = torch.zeros(num_bins)
+    n_frames = 0
+    for f in ev_files:
+        scene, token = f.parent.parent.name, f.stem
+        ot = extra / "occ3d_transfer" / scene / "LIDAR_TOP" / f"{token}.arrow"
+        if not ot.exists():
+            continue
+        ev = pl.read_ipc(f, memory_map=False)
+        occ = series_to_torch(ev["LIDAR_TOP.evidence.occupied"])[0].bool()
+        m_omega = series_to_torch(ev["LIDAR_TOP.evidence.belief"])[0][2].float().clamp(0, 1)
+        fdist = series_to_torch(pl.read_ipc(ot, memory_map=False)["LIDAR_TOP.occ3d_transfer.fill_distance"])[0].float()
+        occ3d = fdist == 0  # real Occ3D voxels
+
+        tot_i += int((occ & occ3d).sum())
+        tot_u += int((occ | occ3d).sum())
+        tot_pred += int(occ.sum())
+        tot_gt += int(occ3d.sum())
+
+        # calibration over OUR occupied voxels: error = not in Occ3D
+        u = m_omega[occ]
+        err = (~occ3d[occ]).float()
+        b = (u * num_bins).clamp(0, num_bins - 1).long()
+        bin_n += torch.bincount(b, minlength=num_bins).float()
+        bin_u += torch.bincount(b, weights=u, minlength=num_bins).float()
+        bin_err += torch.bincount(b, weights=err, minlength=num_bins).float()
+        n_frames += 1
+
+    iou = tot_i / max(tot_u, 1)
+    prec = tot_i / max(tot_pred, 1)
+    rec = tot_i / max(tot_gt, 1)
+    print(f"\nGeometry vs Occ3D over {n_frames} key-frames:")
+    print(f"  IoU={iou:.3f}  precision={prec:.3f}  recall={rec:.3f}")
+    print(f"  ours={tot_pred:,}  occ3d={tot_gt:,}  extra(ours\\occ3d)={tot_pred-tot_i:,}  missed(occ3d\\ours)={tot_gt-tot_i:,}")
+    print("\nUncertainty calibration (m_omega vs disagree-with-Occ3D rate):")
+    ece = 0.0
+    total = float(bin_n.sum())
+    for i in range(num_bins):
+        if bin_n[i] == 0:
+            continue
+        mu = float(bin_u[i] / bin_n[i])
+        er = float(bin_err[i] / bin_n[i])
+        ece += float(bin_n[i]) / total * abs(mu - er)
+        print(f"  [{i/num_bins:.1f},{(i+1)/num_bins:.1f})  n={int(bin_n[i]):>8d}  mean_uncert={mu:.3f}  disagree_rate={er:.3f}")
+    print(f"  ECE(proxy)={ece:.3f}")
+
+
 @app.command(name="manifest")
 def manifest(ctx: typer.Context, write: bool = True) -> None:
     """Report per-stage completeness across all scenes and (optionally) write a manifest.json."""
