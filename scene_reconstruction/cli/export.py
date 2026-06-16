@@ -8,6 +8,7 @@ from scene_reconstruction.cli.config import make_cfg
 from scene_reconstruction.data.nuscenes.scene_flow import SceneFlow
 from scene_reconstruction.labels.box_semantics import BoxSemantics
 from scene_reconstruction.labels.occ3d_transfer import Occ3dTransfer
+from scene_reconstruction.labels.ood_fusion import OodFusion
 from scene_reconstruction.occupancy.evidence_export import EvidenceExport
 from scene_reconstruction.occupancy.temporal_transmission_and_reflection import TemporalTransmissionAndReflection
 from scene_reconstruction.occupancy.transmission_reflection import ReflectionTransmissionSpherical
@@ -75,6 +76,15 @@ def box_semantics(ctx: typer.Context) -> None:
 
     box_semantics: BoxSemantics = instantiate(cfg.export.box_semantics)
     box_semantics.process_data()
+
+
+@app.command(name="ood")
+def ood(ctx: typer.Context) -> None:
+    """OOD layer: epistemic uncertainty (+ optional EchoOOD / synthetic injection)."""
+    cfg = ctx.meta["cfg"]
+
+    ood_fusion: OodFusion = instantiate(cfg.export.ood)
+    ood_fusion.process_data()
 
 
 @app.command(name="sensor-belief-maps", no_args_is_help=True)

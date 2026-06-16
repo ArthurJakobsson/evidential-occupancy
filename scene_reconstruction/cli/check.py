@@ -95,9 +95,22 @@ def labels(ctx: typer.Context, num_samples: int = 5) -> None:
             classes = sorted(int(c) for c in cat.unique().tolist() if c > 0)
             box_info = f"fg_voxels={int((cat > 0).sum())} classes={classes}"
 
+        ood_info = "NA"
+        op = extra / "ood" / scene_name / "LIDAR_TOP" / f"{token}.arrow"
+        if op.exists():
+            od = pl.read_ipc(op, memory_map=False)
+            score = series_to_torch(od["LIDAR_TOP.ood.score"])[0].float()
+            src = series_to_torch(od["LIDAR_TOP.ood.source"])[0]
+            is_syn = series_to_torch(od["LIDAR_TOP.ood.is_synthetic"])[0]
+            assert tuple(score.shape) == SHAPE and tuple(src.shape) == SHAPE, "ood shape mismatch"
+            assert float(score.min()) >= 0.0 and float(score.max()) <= 1.0, "ood score out of [0,1]"
+            assert int(src.max()) <= 7, "ood source bitmask out of range"
+            assert bool((score[is_syn.bool()] == 1.0).all()) if bool(is_syn.any()) else True, "synthetic != score 1"
+            ood_info = f"mean@occ={float(score[occupied.bool()].mean()):.2f} synth={int(is_syn.sum())}"
+
         print(
             f"OK {scene_name}/{token[:8]} occ={int(occupied.bool().sum()):>6} "
-            f"m_omega[{m_omega.min():.2f},{m_omega.max():.2f}] | occ3d: {sem_info} | box: {box_info}"
+            f"m_omega[{m_omega.min():.2f},{m_omega.max():.2f}] | occ3d: {sem_info} | box: {box_info} | ood: {ood_info}"
         )
         checked += 1
 

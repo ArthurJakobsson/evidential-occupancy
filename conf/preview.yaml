@@ -115,3 +115,20 @@ export:
     missing_only: false
     scene_offset: 0
     num_scenes: null
+
+  ood:
+    _target_: scene_reconstruction.labels.ood_fusion.OodFusion
+    ds:
+      _target_: scene_reconstruction.data.nuscenes.dataset.NuscenesDataset
+      data_root: data/nuscenes
+      extra_data_root: data/nuscenes_extra
+      version: v1.0-mini
+      key_frames_only: true
+    extra_data_root: data/nuscenes_extra
+    uncertainty_threshold: 0.6
+    num_synthetic_anomalies: 0
+    anomaly_radius_vox: 3
+    seed_base: 0
+    missing_only: false
+    scene_offset: 0
+    num_scenes: null

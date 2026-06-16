@@ -130,3 +130,20 @@ export:
     missing_only: true
     scene_offset: 0
     num_scenes: null
+
+  ood:
+    _target_: scene_reconstruction.labels.ood_fusion.OodFusion
+    ds:
+      _target_: scene_reconstruction.data.nuscenes.dataset.NuscenesDataset
+      data_root: ${oc.env:NUSCENES_ROOT,data/nuscenes}
+      extra_data_root: ${oc.env:NUSCENES_EXTRA_ROOT,data/nuscenes_extra}
+      version: v1.0-trainval
+      key_frames_only: true
+    extra_data_root: ${oc.env:NUSCENES_EXTRA_ROOT,data/nuscenes_extra}
+    uncertainty_threshold: 0.6
+    num_synthetic_anomalies: 0
+    anomaly_radius_vox: 3
+    seed_base: 0
+    missing_only: true
+    scene_offset: 0
+    num_scenes: null
