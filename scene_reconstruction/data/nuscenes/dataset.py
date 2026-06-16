@@ -389,6 +389,10 @@ class NuscenesDataset:
         """Loads Occ3D semantic classes transferred onto the evidential geometry."""
         return self._load_label_stage(scene, "occ3d_transfer", root_path)
 
+    def load_box_semantics(self, scene: pl.DataFrame, root_path: Optional[Union[Path, str]] = None):
+        """Loads per-voxel 3D-box foreground class + instance id."""
+        return self._load_label_stage(scene, "box_semantics", root_path)
+
     def load_scene_flow_polars(self, scene: pl.DataFrame, root_path: Optional[Union[Path, str]] = None):
         """Loads scene flow information."""
         root_path = Path(root_path) if root_path is not None else self.extra_data_root

@@ -117,3 +117,16 @@ export:
     missing_only: true
     scene_offset: 0
     num_scenes: null
+
+  box_semantics:
+    _target_: scene_reconstruction.labels.box_semantics.BoxSemantics
+    ds:
+      _target_: scene_reconstruction.data.nuscenes.dataset.NuscenesDataset
+      data_root: ${oc.env:NUSCENES_ROOT,data/nuscenes}
+      extra_data_root: ${oc.env:NUSCENES_EXTRA_ROOT,data/nuscenes_extra}
+      version: v1.0-trainval
+      key_frames_only: true
+    extra_data_root: ${oc.env:NUSCENES_EXTRA_ROOT,data/nuscenes_extra}
+    missing_only: true
+    scene_offset: 0
+    num_scenes: null

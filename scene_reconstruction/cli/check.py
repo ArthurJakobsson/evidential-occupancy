@@ -72,9 +72,21 @@ def labels(ctx: typer.Context, num_samples: int = 5) -> None:
             mean_fill = float(fo[fo.isfinite()].mean()) if bool(fo.isfinite().any()) else float("inf")
             sem_info = f"labeled-occ={frac:.0%} mean_fill={mean_fill:.2f}m"
 
+        box_info = "NA"
+        bp = extra / "box_semantics" / scene_name / "LIDAR_TOP" / f"{token}.arrow"
+        if bp.exists():
+            bd = pl.read_ipc(bp, memory_map=False)
+            cat = series_to_torch(bd["LIDAR_TOP.box_semantics.category_index"])[0]  # [400,400,32]
+            inst = series_to_torch(bd["LIDAR_TOP.box_semantics.scene_instance_index"])[0]
+            assert tuple(cat.shape) == SHAPE and tuple(inst.shape) == SHAPE, "box shape mismatch"
+            assert int(cat.min()) >= 0 and int(cat.max()) <= 10, "box category out of 0..10 (foreground)"
+            assert bool(((cat > 0) <= (inst > 0)).all()), "foreground class without an instance id"
+            classes = sorted(int(c) for c in cat.unique().tolist() if c > 0)
+            box_info = f"fg_voxels={int((cat > 0).sum())} classes={classes}"
+
         print(
             f"OK {scene_name}/{token[:8]} occ={int(occupied.bool().sum()):>6} "
-            f"m_omega[min,max]=[{m_omega.min():.3f},{m_omega.max():.3f}] | occ3d: {sem_info}"
+            f"m_omega[{m_omega.min():.2f},{m_omega.max():.2f}] | occ3d: {sem_info} | box: {box_info}"
         )
         checked += 1
 

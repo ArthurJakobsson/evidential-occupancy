@@ -6,6 +6,7 @@ from hydra.utils import instantiate
 
 from scene_reconstruction.cli.config import make_cfg
 from scene_reconstruction.data.nuscenes.scene_flow import SceneFlow
+from scene_reconstruction.labels.box_semantics import BoxSemantics
 from scene_reconstruction.labels.occ3d_transfer import Occ3dTransfer
 from scene_reconstruction.occupancy.evidence_export import EvidenceExport
 from scene_reconstruction.occupancy.temporal_transmission_and_reflection import TemporalTransmissionAndReflection
@@ -65,6 +66,15 @@ def occ3d_transfer(ctx: typer.Context) -> None:
 
     occ3d_transfer: Occ3dTransfer = instantiate(cfg.export.occ3d_transfer)
     occ3d_transfer.process_data()
+
+
+@app.command(name="box-semantics")
+def box_semantics(ctx: typer.Context) -> None:
+    """Foreground class + instance labels from 3D boxes (via scene-flow instance ids)."""
+    cfg = ctx.meta["cfg"]
+
+    box_semantics: BoxSemantics = instantiate(cfg.export.box_semantics)
+    box_semantics.process_data()
 
 
 @app.command(name="sensor-belief-maps", no_args_is_help=True)

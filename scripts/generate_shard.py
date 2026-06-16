@@ -36,6 +36,7 @@ STEP_NODES = {
     "temporal-accumulation": "export.temporal_accumulation",
     "occupancy-export": "export.evidence_export",
     "occ3d-transfer": "export.occ3d_transfer",
+    "box-semantics": "export.box_semantics",
 }
 # No-external-dependency stages that always run end-to-end per shard.
 DEFAULT_STEPS = [
@@ -44,6 +45,7 @@ DEFAULT_STEPS = [
     "temporal-accumulation",
     "occupancy-export",
     "occ3d-transfer",
+    "box-semantics",
 ]
 
 
