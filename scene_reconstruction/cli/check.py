@@ -8,6 +8,7 @@ stage can be checked in isolation before scaling up. Usage:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import polars as pl
@@ -20,6 +21,16 @@ from scene_reconstruction.data.nuscenes.polars_helpers import series_to_torch
 app = typer.Typer(name="check", callback=make_cfg, help="Validate generated labels.", no_args_is_help=True)
 
 SHAPE = (400, 400, 32)
+# label stages written under <extra>/<dir>/<scene>/LIDAR_TOP/<token>.arrow, in dependency order
+STAGE_DIRS = [
+    "reflection_and_transmission_multi_frame",
+    "evidence",
+    "occ3d_transfer",
+    "box_semantics",
+    "lidarseg_transfer",
+    "ood",
+    "locc_transfer",
+]
 
 
 def _sample_files(files: list[Path], n: int = 5) -> list[Path]:
@@ -91,3 +102,29 @@ def labels(ctx: typer.Context, num_samples: int = 5) -> None:
         checked += 1
 
     print(f"\nchecked {checked} key-frames — all assertions passed")
+
+
+@app.command(name="manifest")
+def manifest(ctx: typer.Context, write: bool = True) -> None:
+    """Report per-stage completeness across all scenes and (optionally) write a manifest.json."""
+    cfg = ctx.meta["cfg"]
+    extra = Path(str(cfg.export.evidence_export.extra_data_root))
+
+    per_stage: dict[str, set[str]] = {}
+    for stage in STAGE_DIRS:
+        tokens = {f.stem for f in (extra / stage).glob("*/LIDAR_TOP/*.arrow")}
+        per_stage[stage] = tokens
+        print(f"  {stage:<40s} {len(tokens):>7d} key-frames")
+
+    all_tokens = sorted(set().union(*per_stage.values())) if per_stage else []
+    complete = sum(all(t in per_stage[s] for s in STAGE_DIRS if per_stage[s]) for t in all_tokens)
+    print(f"\n{len(all_tokens)} unique key-frames; {complete} have every non-empty stage")
+
+    if write:
+        out = extra / "manifest.json"
+        manifest_data = {
+            "stage_counts": {s: len(t) for s, t in per_stage.items()},
+            "tokens": {t: [s for s in STAGE_DIRS if t in per_stage[s]] for t in all_tokens},
+        }
+        out.write_text(json.dumps(manifest_data, indent=0))
+        print(f"wrote {out}")
