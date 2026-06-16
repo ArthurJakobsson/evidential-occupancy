@@ -108,6 +108,45 @@ def colorize(pts, conf, omega, cls, mode, z_range) -> np.ndarray:
     return (mpl.colormaps["turbo"](vals)[:, :3] * 255).astype(np.uint8)
 
 
+# colormap + scalar-field label per scalar color mode (must match `colorize`)
+SCALAR_CMAP = {"uncertainty": "turbo", "confidence": "viridis", "height": "turbo"}
+SCALAR_LABEL = {"uncertainty": "m_omega (epistemic uncertainty)", "confidence": "m_o - m_f", "height": "height z (m)"}
+
+
+def legend_image(mode: str, present_classes: list[int], scalar_range: tuple[float, float]) -> np.ndarray:
+    """Render a color guide: class swatches for occ3d_class, a colorbar for scalar modes."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+
+    if mode == "occ3d_class":
+        classes = present_classes or [0]
+        fig, ax = plt.subplots(figsize=(2.6, 0.30 * len(classes) + 0.2))
+        ax.axis("off")
+        for i, c in enumerate(classes):
+            y = len(classes) - 1 - i
+            ax.add_patch(Rectangle((0, y), 0.8, 0.8, facecolor=occupancy_color_map[c].numpy() / 255.0,
+                                   edgecolor="k", lw=0.4))
+            ax.text(1.0, y + 0.4, CLASS_NAMES[c], va="center", fontsize=8)
+        ax.set_xlim(0, 5)
+        ax.set_ylim(0, len(classes))
+    else:
+        grad = np.linspace(scalar_range[0], scalar_range[1], 256)[None, :]
+        fig, ax = plt.subplots(figsize=(2.8, 0.7))
+        ax.imshow(grad, aspect="auto", cmap=SCALAR_CMAP[mode],
+                  extent=[scalar_range[0], scalar_range[1], 0, 1])
+        ax.set_yticks([])
+        ax.set_title(SCALAR_LABEL[mode], fontsize=8)
+        ax.tick_params(labelsize=7)
+    fig.tight_layout(pad=0.2)
+    fig.canvas.draw()
+    w, h = fig.canvas.get_width_height()
+    img = np.frombuffer(fig.canvas.buffer_rgba(), np.uint8).reshape(h, w, 4)[..., :3].copy()
+    plt.close(fig)
+    return img
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data_dir", default="data/nuscenes_extra/reflection_and_transmission_multi_frame")
@@ -156,8 +195,19 @@ def main():
         default_mode = "occ3d_class" if have_sem else "height"
         color_mode = server.gui.add_dropdown("Color by", options=COLOR_MODES, initial_value=default_mode)
         psize = server.gui.add_slider("Point size", min=0.02, max=0.4, step=0.01, initial_value=args.point_size)
+    legend_folder = server.gui.add_folder("Color guide")
 
-    state = {"idx": 0}
+    state = {"idx": 0, "legend": None, "legend_key": None}
+
+    def update_legend(mode, present_classes, scalar_range):
+        key = (mode, tuple(present_classes)) if mode == "occ3d_class" else (mode, scalar_range)
+        if key == state["legend_key"]:
+            return  # unchanged -> skip the matplotlib rebuild
+        state["legend_key"] = key
+        if state["legend"] is not None:
+            state["legend"].remove()
+        with legend_folder:
+            state["legend"] = server.gui.add_image(legend_image(mode, present_classes, scalar_range), label=None)
 
     def render():
         s = samples[state["idx"]]
@@ -170,10 +220,11 @@ def main():
         else:
             cols = colorize(pts, conf, omega, cls, mode, z_range)
         pc.points, pc.colors, pc.point_size = pts, cols, psize.value
-        present = ""
-        if cls is not None:
-            uniq = sorted(set(int(c) for c in np.unique(cls)))
-            present = ", ".join(CLASS_NAMES[c] for c in uniq if c != 17)
+
+        present_classes = sorted(int(c) for c in np.unique(cls)) if cls is not None else []
+        present = ", ".join(CLASS_NAMES[c] for c in present_classes if c != 17)
+        scalar_range = z_range if mode == "height" else (0.0, 1.0)
+        update_legend(mode, [c for c in present_classes if c != 17] or present_classes, scalar_range)
         info.content = (
             f"### Sample {state['idx'] + 1}/{len(samples)}\n"
             f"**scene:** `{s['scene']}`\n\n**token:** `{s['token']}`\n\n"
