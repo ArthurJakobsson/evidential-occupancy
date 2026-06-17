@@ -62,6 +62,37 @@ pixi run python scripts/vis_occupancy_viser.py --num_samples 5                  
 by it. On scene-0061 it distinguishes tree / building / grass / wall / fence / traffic light / sign —
 finer than Occ3D's manmade/vegetation.
 
+## `locc-project` — label OUR occupancy directly (recommended for full coverage)
+
+`locc-transfer` (above) lifts LOcc's *own* occupancy: LOcc voxelizes lidar points and labels
+only voxels a lidar return landed in, so evidential voxels LOcc's lidar pass missed — including
+low-confidence ones — stay unlabeled (~72% of our occupied voxels get a class on mini).
+
+`locc-project` (`scene_reconstruction/labels/locc_project.py`) decouples occupancy from
+labeling, like LOcc's `PseudoOccGeneration-VoxelProjection.py` but driven by **our** geometry:
+for every voxel our `evidence` marks `occupied`, it projects the voxel center (ego frame) into
+each camera's SAN OV-Seg image and reads the class there. Occupancy comes entirely from the
+evidence stage, so every occupied voxel gets a class wherever a camera sees it (**~97%** coverage
+on mini, vs ~72% for `locc-transfer`). It needs only the **SAN OV-Seg PNGs** (LOcc step 2) — no
+GT-generation, no lidarseg, no `can_bus`.
+
+```bash
+cd ~/Documents/evidential-occupancy
+# uses conf node export.locc_project (seg_root -> the SAN san_qwen_scene dir; writes vocab.json)
+pixi run python -m scene_reconstruction.cli.main export ./conf preview locc-project
+pixi run python scripts/vis_occupancy_viser.py --num_samples 5    # Color by: locc_project
+```
+Output `<extra>/locc_project/<scene>/LIDAR_TOP/<token>.arrow` carries
+`LIDAR_TOP.locc_project.semantics` int16 [1,400,400,32] (`-1` = unlabeled), labelled natively at
+0.2 m (no 2×2×2 upsample). The viewer's **`locc_project`** color mode shows it; keep
+**`locc_class`** to compare against LOcc's own voxelization. On the L40S set `LOCC_SEG_ROOT` /
+`LOCC_VOCAB` (see `conf/full.yaml`); the stage is opt-in in `scripts/generate_shard.py`
+(`--steps … locc-project`).
+
+CAVEAT (intentional): voxel-center projection has no occlusion test, so a voxel occluded from a
+camera inherits whatever surface is in front of it. A depth gate (keep the label only where the
+voxel's projected depth matches the first surface) is the natural fix if results need it.
+
 ## Full open-vocab (Qwen) path — recommended on the L40S
 Run steps 1-3 in order with the real LVLM vocabulary instead of `--fixed_vocab`:
 ```bash

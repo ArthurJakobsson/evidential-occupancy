@@ -39,6 +39,7 @@ STEP_NODES = {
     "box-semantics": "export.box_semantics",
     "ood": "export.ood",
     "locc-transfer": "export.locc_transfer",
+    "locc-project": "export.locc_project",
 }
 # No-external-dependency stages that always run end-to-end per shard.
 DEFAULT_STEPS = [

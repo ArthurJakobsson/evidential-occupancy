@@ -140,3 +140,19 @@ export:
     missing_only: false
     scene_offset: 0
     num_scenes: null
+
+  locc_project:
+    _target_: scene_reconstruction.labels.locc_project.LoccProject
+    ds:
+      _target_: scene_reconstruction.data.nuscenes.dataset.NuscenesDataset
+      data_root: data/nuscenes
+      extra_data_root: data/nuscenes_extra
+      version: v1.0-mini
+      key_frames_only: true
+    extra_data_root: data/nuscenes_extra
+    # SAN OV-Seg output dir (LOcc step 2) + its vocabulary (see LOCC_SETUP.md)
+    seg_root: /home/adteam/Documents/LOcc/data/occ3d/san_qwen_scene
+    vocab_file: /home/adteam/Documents/LOcc/data/occ3d/san_qwen_scene/vocab.txt
+    missing_only: false
+    scene_offset: 0
+    num_scenes: null

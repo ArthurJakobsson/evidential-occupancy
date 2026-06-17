@@ -7,6 +7,7 @@ from hydra.utils import instantiate
 from scene_reconstruction.cli.config import make_cfg
 from scene_reconstruction.data.nuscenes.scene_flow import SceneFlow
 from scene_reconstruction.labels.box_semantics import BoxSemantics
+from scene_reconstruction.labels.locc_project import LoccProject
 from scene_reconstruction.labels.locc_transfer import LoccTransfer
 from scene_reconstruction.labels.occ3d_transfer import Occ3dTransfer
 from scene_reconstruction.labels.ood_fusion import OodFusion
@@ -95,6 +96,15 @@ def locc_transfer(ctx: typer.Context) -> None:
 
     locc_transfer: LoccTransfer = instantiate(cfg.export.locc_transfer)
     locc_transfer.process_data()
+
+
+@app.command(name="locc-project")
+def locc_project(ctx: typer.Context) -> None:
+    """Open-vocab labels by projecting OUR occupied voxels into the SAN OV-Seg images."""
+    cfg = ctx.meta["cfg"]
+
+    locc_project: LoccProject = instantiate(cfg.export.locc_project)
+    locc_project.process_data()
 
 
 @app.command(name="sensor-belief-maps", no_args_is_help=True)

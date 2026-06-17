@@ -162,3 +162,19 @@ export:
     missing_only: true
     scene_offset: 0
     num_scenes: null
+
+  locc_project:
+    _target_: scene_reconstruction.labels.locc_project.LoccProject
+    ds:
+      _target_: scene_reconstruction.data.nuscenes.dataset.NuscenesDataset
+      data_root: ${oc.env:NUSCENES_ROOT,data/nuscenes}
+      extra_data_root: ${oc.env:NUSCENES_EXTRA_ROOT,data/nuscenes_extra}
+      version: v1.0-trainval
+      key_frames_only: true
+    extra_data_root: ${oc.env:NUSCENES_EXTRA_ROOT,data/nuscenes_extra}
+    # SAN OV-Seg output dir (LOcc step 2) + its vocabulary (see LOCC_SETUP.md)
+    seg_root: ${oc.env:LOCC_SEG_ROOT,data/nuscenes_extra/locc_san_seg}
+    vocab_file: ${oc.env:LOCC_VOCAB,data/nuscenes_extra/locc_san_seg/vocab.txt}
+    missing_only: true
+    scene_offset: 0
+    num_scenes: null
