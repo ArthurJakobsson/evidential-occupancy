@@ -160,6 +160,7 @@ export:
     # SAN OV-Seg output dir (LOcc step 2) + its vocabulary (see LOCC_SETUP.md)
     seg_root: /home/adteam/Documents/LOcc/data/occ3d/san_qwen_scene
     vocab_file: /home/adteam/Documents/LOcc/data/occ3d/san_qwen_scene/vocab.txt
+    temporal: true   # pool labels across key-frames (fill blind spots + consistency); objects per-instance
     missing_only: false
     scene_offset: 0
     num_scenes: null

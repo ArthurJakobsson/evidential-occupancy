@@ -72,9 +72,18 @@ low-confidence ones — stay unlabeled (~72% of our occupied voxels get a class 
 labeling, like LOcc's `PseudoOccGeneration-VoxelProjection.py` but driven by **our** geometry:
 for every voxel our `evidence` marks `occupied`, it projects the voxel center (ego frame) into
 each camera's SAN OV-Seg image and reads the class there. Occupancy comes entirely from the
-evidence stage, so every occupied voxel gets a class wherever a camera sees it (**~97%** coverage
-on mini, vs ~72% for `locc-transfer`). It needs only the **SAN OV-Seg PNGs** (LOcc step 2) — no
-GT-generation, no lidarseg, no `can_bus`.
+evidence stage, so every occupied voxel gets a class wherever a camera sees it. It needs only the
+**SAN OV-Seg PNGs** (LOcc step 2) — no GT-generation, no lidarseg, no `can_bus`.
+
+**Temporal aggregation** (`temporal: true`, default): a single frame can't label the camera/lidar
+blind spot around the ego, and per-frame labels flicker. So labels are pooled across the scene's
+key-frames and voted, split like LOcc's point-based GT: **background** voxels
+(`scene_flow.scene_instance_index == 0`) are pooled in the **global frame** (via `global_from_ego`)
+— so the ground under the ego inherits the label a camera gave it at another frame — while
+**boxed objects** are voted **per scene-instance** and written at each frame's de-warped position,
+so objects can't streak a trail of their label across the world. On mini this lifts coverage to
+**~99.9%** (vs ~72% for `locc-transfer`), fills the under-ego patch (0% → ~97% labeled there), and
+makes every object a single consistent class. Set `temporal: false` for the raw per-frame labels.
 
 ```bash
 cd ~/Documents/evidential-occupancy

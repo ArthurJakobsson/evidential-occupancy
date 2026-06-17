@@ -175,6 +175,7 @@ export:
     # SAN OV-Seg output dir (LOcc step 2) + its vocabulary (see LOCC_SETUP.md)
     seg_root: ${oc.env:LOCC_SEG_ROOT,data/nuscenes_extra/locc_san_seg}
     vocab_file: ${oc.env:LOCC_VOCAB,data/nuscenes_extra/locc_san_seg/vocab.txt}
+    temporal: true   # pool labels across key-frames (fill blind spots + consistency); objects per-instance
     missing_only: true
     scene_offset: 0
     num_scenes: null
